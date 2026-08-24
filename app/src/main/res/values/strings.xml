@@ -45,6 +45,8 @@
     <string name="retry_and_bubble">再試行してバブル化</string>
     <string name="stop_capture">撮影を停止</string>
     <string name="open_gallery">写真を見る</string>
+    <string name="show_fullscreen_image">画像を全画面表示</string>
+    <string name="fullscreen_image_description">添付画像。タップして閉じます。</string>
     <string name="usage_warning">撮影開始後は画面をロックしても継続します。1秒間隔やロック中の長時間撮影は、発熱・電池消費・保存容量の増加が大きくなります。撮影中はAndroidのカメラ使用表示と常駐通知が表示されます。メーカー独自の省電力設定では、間隔が遅れたり撮影が停止したりする場合があります。</string>
     <string name="storage_info">保存先: Pictures/IntervalBubbleCamera\n写真は端末内だけに保存されます。</string>
     <string name="permission_required_title">権限が必要です</string>

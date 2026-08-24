@@ -52,6 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var overlayPermissionButton: MaterialButton
     private lateinit var startStopButton: MaterialButton
     private lateinit var openGalleryButton: MaterialButton
+    private lateinit var showFullscreenImageButton: MaterialButton
 
     private val preferences by lazy { getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE) }
     private var selectedIconColor = AppIconColor.DEFAULT
@@ -139,6 +140,7 @@ class MainActivity : AppCompatActivity() {
         overlayPermissionButton = findViewById(R.id.overlayPermissionButton)
         startStopButton = findViewById(R.id.startStopButton)
         openGalleryButton = findViewById(R.id.openGalleryButton)
+        showFullscreenImageButton = findViewById(R.id.showFullscreenImageButton)
     }
 
     private fun restorePreferences() {
@@ -205,6 +207,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         openGalleryButton.setOnClickListener { openGallery() }
+        showFullscreenImageButton.setOnClickListener {
+            startActivity(Intent(this, FullscreenImageActivity::class.java))
+        }
     }
 
     private fun observeCaptureState() {

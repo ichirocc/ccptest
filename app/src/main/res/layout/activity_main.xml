@@ -421,6 +421,16 @@
             android:textAllCaps="false"
             app:cornerRadius="16dp" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/showFullscreenImageButton"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="10dp"
+            android:text="@string/show_fullscreen_image"
+            android:textAllCaps="false"
+            app:cornerRadius="16dp" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

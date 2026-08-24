@@ -26,6 +26,11 @@
             android:exported="true"
             android:launchMode="singleTop" />
 
+        <activity
+            android:name=".FullscreenImageActivity"
+            android:exported="false"
+            android:theme="@style/Theme.IntervalBubbleCamera.Fullscreen" />
+
         <activity-alias
             android:name=".launcher.Blue"
             android:enabled="true"
