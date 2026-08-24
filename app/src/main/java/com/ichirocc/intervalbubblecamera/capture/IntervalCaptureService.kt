@@ -24,6 +24,7 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.ichirocc.intervalbubblecamera.AppIconColor
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.R
@@ -50,6 +51,7 @@ class IntervalCaptureService : LifecycleService() {
     private var sessionGeneration = 0
     private var currentIntervalSeconds = IntervalPolicy.DEFAULT_SECONDS
     private var currentLensFacing = LENS_BACK
+    private var currentIconColor = AppIconColor.DEFAULT
     private lateinit var orientationListener: OrientationEventListener
 
     override fun onCreate() {
@@ -79,8 +81,15 @@ class IntervalCaptureService : LifecycleService() {
                 val lens = intent.getStringExtra(EXTRA_LENS_FACING)
                     ?.takeIf { it == LENS_BACK || it == LENS_FRONT }
                     ?: LENS_BACK
-                startCapture(interval, lens)
+                val iconColor = AppIconColor.fromStorageKey(
+                    intent.getStringExtra(EXTRA_ICON_COLOR),
+                )
+                startCapture(interval, lens, iconColor)
             }
+
+            ACTION_UPDATE_ICON_COLOR -> updateIconColor(
+                AppIconColor.fromStorageKey(intent.getStringExtra(EXTRA_ICON_COLOR)),
+            )
 
             ACTION_STOP -> stopCapture("撮影を停止しました。")
             else -> stopSelf(startId)
@@ -89,7 +98,11 @@ class IntervalCaptureService : LifecycleService() {
         return START_NOT_STICKY
     }
 
-    private fun startCapture(intervalSeconds: Int, lensFacing: String) {
+    private fun startCapture(
+        intervalSeconds: Int,
+        lensFacing: String,
+        iconColor: AppIconColor,
+    ) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
@@ -100,6 +113,7 @@ class IntervalCaptureService : LifecycleService() {
 
         currentIntervalSeconds = intervalSeconds
         currentLensFacing = lensFacing
+        currentIconColor = iconColor
         sessionGeneration += 1
         val generation = sessionGeneration
 
@@ -250,9 +264,21 @@ class IntervalCaptureService : LifecycleService() {
 
     private fun showBubble(): Boolean {
         bubbleOverlay?.hide()
-        val overlay = BubbleOverlay(this)
+        val overlay = BubbleOverlay(this, currentIconColor.iconRes)
         bubbleOverlay = overlay
         return overlay.show()
+    }
+
+    private fun updateIconColor(iconColor: AppIconColor) {
+        currentIconColor = iconColor
+        if (!CaptureStateStore.state.value.isActive) return
+
+        val overlay = bubbleOverlay
+        if (overlay == null) {
+            if (!showBubble()) Log.w(TAG, "Unable to update the bubble icon color")
+        } else {
+            overlay.updateIcon(iconColor.iconRes)
+        }
     }
 
     private fun stopAfterFatalError() {
@@ -351,8 +377,11 @@ class IntervalCaptureService : LifecycleService() {
     companion object {
         const val ACTION_START = "com.ichirocc.intervalbubblecamera.action.START"
         const val ACTION_STOP = "com.ichirocc.intervalbubblecamera.action.STOP"
+        const val ACTION_UPDATE_ICON_COLOR =
+            "com.ichirocc.intervalbubblecamera.action.UPDATE_ICON_COLOR"
         const val EXTRA_INTERVAL_SECONDS = "interval_seconds"
         const val EXTRA_LENS_FACING = "lens_facing"
+        const val EXTRA_ICON_COLOR = "icon_color"
         const val LENS_BACK = "back"
         const val LENS_FRONT = "front"
 

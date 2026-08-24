@@ -10,11 +10,15 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
+import androidx.annotation.DrawableRes
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.R
 import kotlin.math.abs
 
-class BubbleOverlay(private val context: Context) {
+class BubbleOverlay(
+    private val context: Context,
+    @get:DrawableRes private val iconRes: Int,
+) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val bubbleSize = 72.dp
     private val layoutParams = WindowManager.LayoutParams(
@@ -50,9 +54,13 @@ class BubbleOverlay(private val context: Context) {
         showing = false
     }
 
+    fun updateIcon(@DrawableRes iconRes: Int) {
+        bubbleView.setBackgroundResource(iconRes)
+    }
+
     private fun createBubbleView(): View {
         val root = FrameLayout(context).apply {
-            setBackgroundResource(R.drawable.ic_app_icon)
+            setBackgroundResource(iconRes)
             elevation = 10.dp.toFloat()
             contentDescription = context.getString(R.string.bubble_description)
             isClickable = true

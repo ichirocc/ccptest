@@ -11,4 +11,10 @@
     <color name="danger">#B42318</color>
     <color name="warning_container">#FFF3D6</color>
     <color name="outline">#D9DDEA</color>
+    <color name="icon_blue">#3157D5</color>
+    <color name="icon_green">#16855B</color>
+    <color name="icon_red">#B42318</color>
+    <color name="icon_orange">#C65F00</color>
+    <color name="icon_purple">#7047C8</color>
+    <color name="icon_pink">#C62F75</color>
 </resources>

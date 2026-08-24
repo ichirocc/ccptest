@@ -2,12 +2,15 @@ package com.ichirocc.intervalbubblecamera
 
 import android.Manifest
 import android.content.ActivityNotFoundException
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
+import android.widget.ImageButton
+import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.SeekBar
@@ -41,12 +44,16 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensGroup: RadioGroup
     private lateinit var backCamera: RadioButton
     private lateinit var frontCamera: RadioButton
+    private lateinit var iconColorPreview: ImageView
+    private lateinit var iconColorSelectedLabel: TextView
+    private lateinit var iconColorButtons: Map<AppIconColor, ImageButton>
     private lateinit var permissionStatus: TextView
     private lateinit var overlayPermissionButton: MaterialButton
     private lateinit var startStopButton: MaterialButton
     private lateinit var openGalleryButton: MaterialButton
 
     private val preferences by lazy { getSharedPreferences(PREFERENCES_NAME, MODE_PRIVATE) }
+    private var selectedIconColor = AppIconColor.DEFAULT
     private var pendingStart = false
     private var minimizeWhenRunning = false
 
@@ -111,6 +118,16 @@ class MainActivity : AppCompatActivity() {
         lensGroup = findViewById(R.id.lensGroup)
         backCamera = findViewById(R.id.backCamera)
         frontCamera = findViewById(R.id.frontCamera)
+        iconColorPreview = findViewById(R.id.iconColorPreview)
+        iconColorSelectedLabel = findViewById(R.id.iconColorSelectedLabel)
+        iconColorButtons = linkedMapOf(
+            AppIconColor.BLUE to findViewById(R.id.iconColorBlue),
+            AppIconColor.GREEN to findViewById(R.id.iconColorGreen),
+            AppIconColor.RED to findViewById(R.id.iconColorRed),
+            AppIconColor.ORANGE to findViewById(R.id.iconColorOrange),
+            AppIconColor.PURPLE to findViewById(R.id.iconColorPurple),
+            AppIconColor.PINK to findViewById(R.id.iconColorPink),
+        )
         permissionStatus = findViewById(R.id.permissionStatus)
         overlayPermissionButton = findViewById(R.id.overlayPermissionButton)
         startStopButton = findViewById(R.id.startStopButton)
@@ -132,6 +149,12 @@ class MainActivity : AppCompatActivity() {
             IntervalCaptureService.LENS_FRONT -> frontCamera.isChecked = true
             else -> backCamera.isChecked = true
         }
+
+        selectedIconColor = AppIconColor.fromStorageKey(
+            preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
+        )
+        renderIconColor()
+        updateLauncherIcon(selectedIconColor, showFailure = false)
     }
 
     private fun configureControls() {
@@ -155,6 +178,10 @@ class MainActivity : AppCompatActivity() {
                 IntervalCaptureService.LENS_BACK
             }
             preferences.edit { putString(KEY_LENS_FACING, lens) }
+        }
+
+        iconColorButtons.forEach { (color, button) ->
+            button.setOnClickListener { selectIconColor(color) }
         }
 
         overlayPermissionButton.setOnClickListener {
@@ -259,12 +286,14 @@ class MainActivity : AppCompatActivity() {
         preferences.edit {
             putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
             putString(KEY_LENS_FACING, lensFacing)
+            putString(KEY_ICON_COLOR, selectedIconColor.storageKey)
         }
 
         val serviceIntent = Intent(this, IntervalCaptureService::class.java).apply {
             action = IntervalCaptureService.ACTION_START
             putExtra(IntervalCaptureService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
             putExtra(IntervalCaptureService.EXTRA_LENS_FACING, lensFacing)
+            putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
         }
 
         runCatching {
@@ -311,6 +340,72 @@ class MainActivity : AppCompatActivity() {
             .onFailure { showMessage(getString(R.string.gallery_open_failed)) }
     }
 
+    private fun selectIconColor(color: AppIconColor) {
+        if (selectedIconColor == color) return
+
+        selectedIconColor = color
+        preferences.edit { putString(KEY_ICON_COLOR, color.storageKey) }
+        renderIconColor()
+        updateLauncherIcon(color, showFailure = true)
+
+        if (CaptureStateStore.state.value.isActive) {
+            runCatching {
+                startService(
+                    Intent(this, IntervalCaptureService::class.java).apply {
+                        action = IntervalCaptureService.ACTION_UPDATE_ICON_COLOR
+                        putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, color.storageKey)
+                    },
+                )
+            }.onFailure {
+                showMessage(getString(R.string.icon_color_live_update_failed))
+            }
+        }
+    }
+
+    private fun renderIconColor() {
+        iconColorPreview.setImageResource(selectedIconColor.iconRes)
+        iconColorSelectedLabel.text = getString(
+            R.string.icon_color_selected,
+            getString(selectedIconColor.labelRes),
+        )
+        iconColorSelectedLabel.setTextColor(
+            ContextCompat.getColor(this, selectedIconColor.colorRes),
+        )
+
+        iconColorButtons.forEach { (color, button) ->
+            val selected = color == selectedIconColor
+            button.isSelected = selected
+            button.alpha = if (selected) 1f else 0.52f
+            button.scaleX = if (selected) 1.08f else 0.92f
+            button.scaleY = if (selected) 1.08f else 0.92f
+            button.setBackgroundResource(
+                if (selected) R.drawable.bg_icon_color_selected else android.R.color.transparent,
+            )
+        }
+    }
+
+    private fun updateLauncherIcon(color: AppIconColor, showFailure: Boolean) {
+        val updates = AppIconColor.entries.map { candidate ->
+            PackageManager.ComponentEnabledSetting(
+                ComponentName(
+                    packageName,
+                    "$packageName.${candidate.launcherAliasSuffix}",
+                ),
+                if (candidate == color) {
+                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                } else {
+                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                },
+                PackageManager.DONT_KILL_APP,
+            )
+        }
+
+        runCatching { packageManager.setComponentEnabledSettings(updates) }
+            .onFailure {
+                if (showFailure) showMessage(getString(R.string.launcher_icon_update_failed))
+            }
+    }
+
     private fun refreshPermissionStatus() {
         if (!::permissionStatus.isInitialized) return
         val cameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) ==
@@ -352,5 +447,6 @@ class MainActivity : AppCompatActivity() {
         private const val PREFERENCES_NAME = "capture_preferences"
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
         private const val KEY_LENS_FACING = "lens_facing"
+        private const val KEY_ICON_COLOR = "icon_color"
     }
 }
