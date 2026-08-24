@@ -2,7 +2,6 @@
 <resources>
     <string name="app_name">インターバル・バブルカメラ</string>
     <string name="screen_title">インターバル・バブルカメラ</string>
-    <string name="android_16_only">このアプリはAndroid 16専用です。</string>
     <string name="screen_subtitle">指定した間隔で自動撮影し、他のアプリ使用中や画面ロック中も撮影を継続します。</string>
     <string name="status_idle">待機中</string>
     <string name="status_starting">準備中</string>

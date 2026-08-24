@@ -6,7 +6,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
@@ -96,11 +95,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT != ANDROID_16_API_LEVEL) {
-            Toast.makeText(this, R.string.android_16_only, Toast.LENGTH_LONG).show()
-            finish()
-            return
-        }
         setContentView(R.layout.activity_main)
         bindViews()
         restorePreferences()
@@ -460,6 +454,5 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
         private const val KEY_LENS_FACING = "lens_facing"
         private const val KEY_ICON_COLOR = "icon_color"
-        private const val ANDROID_16_API_LEVEL = 36
     }
 }
