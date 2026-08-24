@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Environment
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
@@ -52,6 +53,7 @@ class IntervalCaptureService : LifecycleService() {
     private var currentIntervalSeconds = IntervalPolicy.DEFAULT_SECONDS
     private var currentLensFacing = LENS_BACK
     private var currentIconColor = AppIconColor.DEFAULT
+    private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var orientationListener: OrientationEventListener
 
     override fun onCreate() {
@@ -124,6 +126,7 @@ class IntervalCaptureService : LifecycleService() {
 
         try {
             startAsCameraForegroundService()
+            refreshWakeLock()
         } catch (error: RuntimeException) {
             Log.e(TAG, "Unable to enter camera foreground mode", error)
             CaptureStateStore.markCaptureError(
@@ -192,6 +195,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob?.cancel()
         captureJob = lifecycleScope.launch {
             while (isActive && generation == sessionGeneration) {
+                refreshWakeLock()
                 val startedAt = SystemClock.elapsedRealtime()
                 when (val result = captureOnePhoto()) {
                     is PhotoResult.Saved -> {
@@ -262,6 +266,24 @@ class IntervalCaptureService : LifecycleService() {
         )
     }
 
+    private fun refreshWakeLock() {
+        val lock = wakeLock ?: getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
+            .apply {
+                setReferenceCounted(false)
+                wakeLock = this
+            }
+
+        if (lock.isHeld) runCatching { lock.release() }
+        lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+    }
+
+    private fun releaseWakeLock() {
+        val lock = wakeLock ?: return
+        if (lock.isHeld) runCatching { lock.release() }
+        wakeLock = null
+    }
+
     private fun showBubble(): Boolean {
         bubbleOverlay?.hide()
         val overlay = BubbleOverlay(this, currentIconColor.iconRes)
@@ -288,6 +310,7 @@ class IntervalCaptureService : LifecycleService() {
         cameraProvider?.unbindAll()
         imageCapture = null
         orientationListener.disable()
+        releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -301,6 +324,7 @@ class IntervalCaptureService : LifecycleService() {
         cameraProvider?.unbindAll()
         imageCapture = null
         orientationListener.disable()
+        releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
         CaptureStateStore.markStopped(detail)
@@ -361,6 +385,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob?.cancel()
         cameraProvider?.unbindAll()
         orientationListener.disable()
+        releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
         if (CaptureStateStore.state.value.isActive) {
@@ -389,6 +414,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val NOTIFICATION_CHANNEL_ID = "interval_capture"
         private const val NOTIFICATION_ID = 1042
         private const val ALBUM_NAME = "IntervalBubbleCamera"
+        private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
+        private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
         private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
     }
 }

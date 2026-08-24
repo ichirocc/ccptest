@@ -264,68 +264,92 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:gravity="center"
-                android:orientation="horizontal">
+                android:orientation="vertical">
 
-                <ImageButton
-                    android:id="@+id/iconColorBlue"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@drawable/bg_icon_color_selected"
-                    android:contentDescription="@string/icon_color_blue"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center"
+                    android:orientation="horizontal">
 
-                <ImageButton
-                    android:id="@+id/iconColorGreen"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/icon_color_green"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon_green" />
+                    <ImageButton
+                        android:id="@+id/iconColorBlue"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@drawable/bg_icon_color_selected"
+                        android:contentDescription="@string/icon_color_blue"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon" />
 
-                <ImageButton
-                    android:id="@+id/iconColorRed"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/icon_color_red"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon_red" />
+                    <ImageButton
+                        android:id="@+id/iconColorGreen"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_green"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_green" />
 
-                <ImageButton
-                    android:id="@+id/iconColorOrange"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/icon_color_orange"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon_orange" />
+                    <ImageButton
+                        android:id="@+id/iconColorRed"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_red"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_red" />
 
-                <ImageButton
-                    android:id="@+id/iconColorPurple"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/icon_color_purple"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon_purple" />
+                    <ImageButton
+                        android:id="@+id/iconColorOrange"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_orange"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_orange" />
+                </LinearLayout>
 
-                <ImageButton
-                    android:id="@+id/iconColorPink"
-                    android:layout_width="0dp"
-                    android:layout_height="56dp"
-                    android:layout_weight="1"
-                    android:background="@android:color/transparent"
-                    android:contentDescription="@string/icon_color_pink"
-                    android:padding="5dp"
-                    android:src="@drawable/ic_app_icon_pink" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:gravity="center"
+                    android:orientation="horizontal">
+
+                    <ImageButton
+                        android:id="@+id/iconColorPurple"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_purple"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_purple" />
+
+                    <ImageButton
+                        android:id="@+id/iconColorPink"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_pink"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_pink" />
+
+                    <ImageButton
+                        android:id="@+id/iconColorBlack"
+                        android:layout_width="56dp"
+                        android:layout_height="56dp"
+                        android:layout_marginHorizontal="4dp"
+                        android:background="@android:color/transparent"
+                        android:contentDescription="@string/icon_color_black"
+                        android:padding="5dp"
+                        android:src="@drawable/ic_app_icon_black" />
+                </LinearLayout>
             </LinearLayout>
 
             <TextView

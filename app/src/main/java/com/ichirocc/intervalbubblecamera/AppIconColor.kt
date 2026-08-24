@@ -18,6 +18,13 @@ enum class AppIconColor(
         iconRes = R.drawable.ic_app_icon,
         launcherAliasSuffix = "launcher.Blue",
     ),
+    BLACK(
+        storageKey = "black",
+        labelRes = R.string.icon_color_black,
+        colorRes = R.color.icon_black,
+        iconRes = R.drawable.ic_app_icon_black,
+        launcherAliasSuffix = "launcher.Black",
+    ),
     GREEN(
         storageKey = "green",
         labelRes = R.string.icon_color_green,

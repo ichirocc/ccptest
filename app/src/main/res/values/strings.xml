@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Interval Bubble Camera</string>
-    <string name="screen_title">Interval Bubble Camera</string>
-    <string name="screen_subtitle">指定した間隔で自動撮影し、他のアプリ使用中はバブルから状態を確認できます。</string>
+    <string name="app_name">インターバル・バブルカメラ</string>
+    <string name="screen_title">インターバル・バブルカメラ</string>
+    <string name="android_16_only">このアプリはAndroid 16専用です。</string>
+    <string name="screen_subtitle">指定した間隔で自動撮影し、他のアプリ使用中や画面ロック中も撮影を継続します。</string>
     <string name="status_idle">待機中</string>
     <string name="status_starting">準備中</string>
     <string name="status_running">撮影中</string>
@@ -24,6 +25,7 @@
     <string name="icon_color_description">ホーム画面とフローティングバブルに同じ色を使用します。</string>
     <string name="icon_color_selected">選択中: %1$s</string>
     <string name="icon_color_blue">ブルー</string>
+    <string name="icon_color_black">ブラック</string>
     <string name="icon_color_green">グリーン</string>
     <string name="icon_color_red">レッド</string>
     <string name="icon_color_orange">オレンジ</string>
@@ -43,7 +45,7 @@
     <string name="retry_and_bubble">再試行してバブル化</string>
     <string name="stop_capture">撮影を停止</string>
     <string name="open_gallery">写真を見る</string>
-    <string name="usage_warning">1秒間隔は発熱・電池消費・保存容量の増加が大きくなります。撮影中はAndroidのカメラ使用表示と常駐通知が表示されます。端末ロック中やメーカー独自の省電力設定では、間隔が遅れたり撮影が停止したりする場合があります。</string>
+    <string name="usage_warning">撮影開始後は画面をロックしても継続します。1秒間隔やロック中の長時間撮影は、発熱・電池消費・保存容量の増加が大きくなります。撮影中はAndroidのカメラ使用表示と常駐通知が表示されます。メーカー独自の省電力設定では、間隔が遅れたり撮影が停止したりする場合があります。</string>
     <string name="storage_info">保存先: Pictures/IntervalBubbleCamera\n写真は端末内だけに保存されます。</string>
     <string name="permission_required_title">権限が必要です</string>
     <string name="action_ok">OK</string>
@@ -54,7 +56,7 @@
     <string name="gallery_open_failed">写真アプリを開けませんでした。</string>
     <string name="notification_channel_name">インターバル撮影</string>
     <string name="notification_channel_description">写真の自動撮影中に表示される常駐通知</string>
-    <string name="notification_title">インターバル撮影中</string>
+    <string name="notification_title">インターバル撮影中（ロック中も継続）</string>
     <string name="notification_stop">停止</string>
     <string name="bubble_description">撮影中。タップしてアプリを開く</string>
 </resources>

@@ -19,6 +19,11 @@ class AppIconColorTest {
     }
 
     @Test
+    fun `black key resolves to the black palette option`() {
+        assertEquals(AppIconColor.BLACK, AppIconColor.fromStorageKey("black"))
+    }
+
+    @Test
     fun `stored keys and launcher aliases are unique`() {
         assertEquals(
             AppIconColor.entries.size,
