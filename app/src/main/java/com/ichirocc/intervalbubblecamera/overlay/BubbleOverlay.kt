@@ -8,6 +8,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.annotation.DrawableRes
@@ -21,6 +22,12 @@ class BubbleOverlay(
 ) {
     private val windowManager = context.getSystemService(WindowManager::class.java)
     private val bubbleSize = 72.dp
+
+    private val statusBarHeight: Int
+        get() = windowManager.currentWindowMetrics.windowInsets
+            .getInsetsIgnoringVisibility(WindowInsets.Type.statusBars())
+            .top
+
     private val layoutParams = WindowManager.LayoutParams(
         bubbleSize,
         bubbleSize,
@@ -98,8 +105,14 @@ class BubbleOverlay(
 
                     val width = context.resources.displayMetrics.widthPixels
                     val height = context.resources.displayMetrics.heightPixels
-                    layoutParams.x = (initialX + deltaX).coerceIn(0, (width - bubbleSize).coerceAtLeast(0))
-                    layoutParams.y = (initialY + deltaY).coerceIn(0, (height - bubbleSize).coerceAtLeast(0))
+                    layoutParams.x = (initialX + deltaX).coerceIn(
+                        -(bubbleSize / 2),
+                        width - (bubbleSize / 2),
+                    )
+                    layoutParams.y = (initialY + deltaY).coerceIn(
+                        -statusBarHeight,
+                        (height - bubbleSize).coerceAtLeast(0),
+                    )
                     if (showing) runCatching { windowManager.updateViewLayout(view, layoutParams) }
                     true
                 }
