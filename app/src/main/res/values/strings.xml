@@ -45,5 +45,4 @@
     <string name="notification_title">インターバル撮影中</string>
     <string name="notification_stop">停止</string>
     <string name="bubble_description">撮影中。タップしてアプリを開く</string>
-    <string name="bubble_count_description">保存した写真の枚数</string>
 </resources>

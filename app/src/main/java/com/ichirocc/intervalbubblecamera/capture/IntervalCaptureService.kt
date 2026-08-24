@@ -182,8 +182,6 @@ class IntervalCaptureService : LifecycleService() {
                 when (val result = captureOnePhoto()) {
                     is PhotoResult.Saved -> {
                         CaptureStateStore.markPhotoSaved(result.fileName)
-                        val count = CaptureStateStore.state.value.photoCount
-                        bubbleOverlay?.updateCount(count)
                         updateForegroundNotification()
                     }
 
@@ -252,9 +250,7 @@ class IntervalCaptureService : LifecycleService() {
 
     private fun showBubble(): Boolean {
         bubbleOverlay?.hide()
-        val overlay = BubbleOverlay(this).also {
-            it.updateCount(CaptureStateStore.state.value.photoCount)
-        }
+        val overlay = BubbleOverlay(this)
         bubbleOverlay = overlay
         return overlay.show()
     }

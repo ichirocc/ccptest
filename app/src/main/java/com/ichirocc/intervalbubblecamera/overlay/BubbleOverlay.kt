@@ -2,9 +2,7 @@ package com.ichirocc.intervalbubblecamera.overlay
 
 import android.content.Context
 import android.content.Intent
-import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.drawable.GradientDrawable
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -12,8 +10,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.ImageView
-import android.widget.TextView
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.R
 import kotlin.math.abs
@@ -34,7 +30,6 @@ class BubbleOverlay(private val context: Context) {
         y = 180.dp
     }
 
-    private val countBadge = TextView(context)
     private val bubbleView = createBubbleView()
     private var showing = false
 
@@ -49,10 +44,6 @@ class BubbleOverlay(private val context: Context) {
         }.getOrDefault(false)
     }
 
-    fun updateCount(count: Int) {
-        countBadge.text = if (count > 99) "99+" else count.toString()
-    }
-
     fun hide() {
         if (!showing) return
         runCatching { windowManager.removeView(bubbleView) }
@@ -61,51 +52,13 @@ class BubbleOverlay(private val context: Context) {
 
     private fun createBubbleView(): View {
         val root = FrameLayout(context).apply {
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(context.getColor(R.color.primary))
-                setStroke(3.dp, Color.WHITE)
-            }
+            setBackgroundResource(R.drawable.ic_app_icon)
             elevation = 10.dp.toFloat()
             contentDescription = context.getString(R.string.bubble_description)
             isClickable = true
             isFocusable = true
             setOnClickListener { openApp() }
         }
-
-        val cameraIcon = ImageView(context).apply {
-            setImageResource(R.drawable.ic_camera)
-            scaleType = ImageView.ScaleType.CENTER
-            contentDescription = null
-        }
-        root.addView(
-            cameraIcon,
-            FrameLayout.LayoutParams(42.dp, 42.dp, Gravity.CENTER),
-        )
-
-        countBadge.apply {
-            text = "0"
-            setTextColor(Color.WHITE)
-            textSize = 10f
-            gravity = Gravity.CENTER
-            minWidth = 24.dp
-            minHeight = 24.dp
-            setPadding(5.dp, 0, 5.dp, 0)
-            background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(context.getColor(R.color.danger))
-                setStroke(2.dp, Color.WHITE)
-            }
-            contentDescription = context.getString(R.string.bubble_count_description)
-        }
-        root.addView(
-            countBadge,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                24.dp,
-                Gravity.END or Gravity.BOTTOM,
-            ),
-        )
 
         attachDragGesture(root)
         return root
