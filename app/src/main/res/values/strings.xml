@@ -20,8 +20,8 @@
     <string name="section_camera">使用するカメラ</string>
     <string name="camera_back">背面カメラ</string>
     <string name="camera_front">前面カメラ</string>
-    <string name="section_icon_color">バブル／アプリアイコンの色</string>
-    <string name="icon_color_description">ホーム画面とフローティングバブルに同じ色を使用します。</string>
+    <string name="section_icon_color">バブルの色</string>
+    <string name="icon_color_description">フローティングバブルの色を選びます。アプリアイコンには影響しません。</string>
     <string name="icon_color_selected">選択中: %1$s</string>
     <string name="icon_color_blue">ブルー</string>
     <string name="icon_color_black">ブラック</string>
@@ -30,7 +30,7 @@
     <string name="icon_color_orange">オレンジ</string>
     <string name="icon_color_purple">パープル</string>
     <string name="icon_color_pink">ピンク</string>
-    <string name="icon_color_system_note">この色設定はアプリのアイコンだけに適用されます。Android右上の緑色カメラ使用表示は変更されません。</string>
+    <string name="icon_color_system_note">この色設定はフローティングバブルだけに適用されます。Android右上の緑色カメラ使用表示は変更されません。</string>
     <string name="launcher_icon_update_failed">ホーム画面のアイコン色を更新できませんでした。端末を再起動して再試行してください。</string>
     <string name="icon_color_live_update_failed">撮影中のバブル色を更新できませんでした。撮影を再開すると反映されます。</string>
     <string name="section_permissions">必要な権限</string>
