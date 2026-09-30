@@ -42,6 +42,9 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 既定の "tools" パッケージは cmdline-tools 16 で廃止されたため入れない（必要なものは次の手順で入れる）。
+          packages: ""
 
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses >/dev/null || true
