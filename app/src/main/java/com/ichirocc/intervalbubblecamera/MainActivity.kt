@@ -27,6 +27,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.materialswitch.MaterialSwitch
 import com.ichirocc.intervalbubblecamera.capture.CapturePhase
 import com.ichirocc.intervalbubblecamera.capture.CaptureStateStore
 import com.ichirocc.intervalbubblecamera.capture.CaptureUiState
@@ -44,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lensGroup: RadioGroup
     private lateinit var backCamera: RadioButton
     private lateinit var frontCamera: RadioButton
+    private lateinit var motionSwitch: MaterialSwitch
+    private lateinit var motionSensitivityGroup: RadioGroup
+    private lateinit var motionSensitivityButtons: Map<MotionSensitivity, RadioButton>
     private lateinit var iconColorPreview: ImageView
     private lateinit var iconColorSelectedLabel: TextView
     private lateinit var iconColorButtons: Map<AppIconColor, ImageButton>
@@ -119,6 +123,13 @@ class MainActivity : AppCompatActivity() {
         lensGroup = findViewById(R.id.lensGroup)
         backCamera = findViewById(R.id.backCamera)
         frontCamera = findViewById(R.id.frontCamera)
+        motionSwitch = findViewById(R.id.motionSwitch)
+        motionSensitivityGroup = findViewById(R.id.motionSensitivityGroup)
+        motionSensitivityButtons = linkedMapOf(
+            MotionSensitivity.LOW to findViewById(R.id.motionSensitivityLow),
+            MotionSensitivity.MEDIUM to findViewById(R.id.motionSensitivityMedium),
+            MotionSensitivity.HIGH to findViewById(R.id.motionSensitivityHigh),
+        )
         iconColorPreview = findViewById(R.id.iconColorPreview)
         iconColorSelectedLabel = findViewById(R.id.iconColorSelectedLabel)
         iconColorButtons = linkedMapOf(
@@ -153,6 +164,12 @@ class MainActivity : AppCompatActivity() {
             else -> backCamera.isChecked = true
         }
 
+        motionSwitch.isChecked = preferences.getBoolean(KEY_MOTION_ENABLED, false)
+        val savedSensitivity = MotionSensitivity.fromStorageKey(
+            preferences.getString(KEY_MOTION_SENSITIVITY, MotionSensitivity.DEFAULT.storageKey),
+        )
+        motionSensitivityButtons.getValue(savedSensitivity).isChecked = true
+
         selectedIconColor = AppIconColor.fromStorageKey(
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
         )
@@ -181,6 +198,15 @@ class MainActivity : AppCompatActivity() {
                 IntervalCaptureService.LENS_BACK
             }
             preferences.edit { putString(KEY_LENS_FACING, lens) }
+        }
+
+        motionSwitch.setOnCheckedChangeListener { _, checked ->
+            preferences.edit { putBoolean(KEY_MOTION_ENABLED, checked) }
+            renderMotionControls(CaptureStateStore.state.value.isActive)
+        }
+
+        motionSensitivityGroup.setOnCheckedChangeListener { _, _ ->
+            preferences.edit { putString(KEY_MOTION_SENSITIVITY, selectedMotionSensitivity().storageKey) }
         }
 
         iconColorButtons.forEach { (color, button) ->
@@ -229,7 +255,11 @@ class MainActivity : AppCompatActivity() {
             },
         )
         statusDetail.text = state.detail
-        photoCount.text = getString(R.string.photo_count, state.photoCount)
+        photoCount.text = if (state.motionEnabled && state.isActive) {
+            getString(R.string.photo_count_with_skipped, state.photoCount, state.skippedCount)
+        } else {
+            getString(R.string.photo_count, state.photoCount)
+        }
         lastPhoto.text = state.lastPhotoName?.let {
             getString(R.string.last_photo_name, it)
         } ?: getString(R.string.last_photo_none)
@@ -238,6 +268,7 @@ class MainActivity : AppCompatActivity() {
         intervalSeekBar.isEnabled = controlsEnabled
         backCamera.isEnabled = controlsEnabled
         frontCamera.isEnabled = controlsEnabled
+        renderMotionControls(state.isActive)
 
         startStopButton.isEnabled = state.phase != CapturePhase.STARTING
         if (state.isActive) {
@@ -259,6 +290,18 @@ class MainActivity : AppCompatActivity() {
             window.decorView.post { moveTaskToBack(true) }
         }
     }
+
+    private fun renderMotionControls(captureActive: Boolean) {
+        motionSwitch.isEnabled = !captureActive
+        val sensitivityEnabled = !captureActive && motionSwitch.isChecked
+        motionSensitivityButtons.values.forEach { it.isEnabled = sensitivityEnabled }
+    }
+
+    private fun selectedMotionSensitivity(): MotionSensitivity =
+        motionSensitivityButtons.entries
+            .firstOrNull { it.value.id == motionSensitivityGroup.checkedRadioButtonId }
+            ?.key
+            ?: MotionSensitivity.DEFAULT
 
     private fun beginStartFlow() {
         pendingStart = true
@@ -289,9 +332,13 @@ class MainActivity : AppCompatActivity() {
         } else {
             IntervalCaptureService.LENS_BACK
         }
+        val motionEnabled = motionSwitch.isChecked
+        val motionSensitivity = selectedMotionSensitivity()
         preferences.edit {
             putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
             putString(KEY_LENS_FACING, lensFacing)
+            putBoolean(KEY_MOTION_ENABLED, motionEnabled)
+            putString(KEY_MOTION_SENSITIVITY, motionSensitivity.storageKey)
             putString(KEY_ICON_COLOR, selectedIconColor.storageKey)
         }
 
@@ -300,6 +347,8 @@ class MainActivity : AppCompatActivity() {
             putExtra(IntervalCaptureService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
             putExtra(IntervalCaptureService.EXTRA_LENS_FACING, lensFacing)
             putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_ENABLED, motionEnabled)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_SENSITIVITY, motionSensitivity.storageKey)
         }
 
         runCatching {
@@ -454,5 +503,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
         private const val KEY_LENS_FACING = "lens_facing"
         private const val KEY_ICON_COLOR = "icon_color"
+        private const val KEY_MOTION_ENABLED = "motion_enabled"
+        private const val KEY_MOTION_SENSITIVITY = "motion_sensitivity"
     }
 }

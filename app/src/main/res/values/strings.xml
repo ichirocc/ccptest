@@ -8,6 +8,7 @@
     <string name="status_running">撮影中</string>
     <string name="status_error">エラー</string>
     <string name="status_prompt">設定後に「開始してバブル化」を押してください。</string>
+    <string name="photo_count_with_skipped">%1$d枚（見送り%2$d）</string>
     <string name="photo_count">%1$d枚</string>
     <string name="photo_count_zero">0枚</string>
     <string name="last_photo_none">最終保存: まだありません</string>
@@ -20,6 +21,12 @@
     <string name="section_camera">使用するカメラ</string>
     <string name="camera_back">背面カメラ</string>
     <string name="camera_front">前面カメラ</string>
+    <string name="section_motion">動体検知</string>
+    <string name="motion_switch">動体があるときだけ保存</string>
+    <string name="motion_description">撮影ごとに前回の画像と比べ、変化があったときだけ保存します。最初の1枚は比較用で保存しません。</string>
+    <string name="motion_sensitivity_low">感度 低</string>
+    <string name="motion_sensitivity_medium">感度 中</string>
+    <string name="motion_sensitivity_high">感度 高</string>
     <string name="section_icon_color">バブルの色</string>
     <string name="icon_color_description">フローティングバブルの色を選びます。アプリアイコンには影響しません。</string>
     <string name="icon_color_selected">選択中: %1$s</string>
