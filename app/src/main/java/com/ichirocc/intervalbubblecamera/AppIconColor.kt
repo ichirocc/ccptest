@@ -9,6 +9,7 @@ enum class AppIconColor(
     @get:StringRes val labelRes: Int,
     @get:ColorRes val colorRes: Int,
     @get:DrawableRes val iconRes: Int,
+    /** 旧版で切り替えていたランチャーの別名。今は切り替えない（AndroidManifest の別名は既存の有効状態を保つため残す）。 */
     val launcherAliasSuffix: String,
 ) {
     BLUE(

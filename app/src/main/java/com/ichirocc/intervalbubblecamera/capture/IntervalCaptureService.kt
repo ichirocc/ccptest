@@ -9,6 +9,11 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.SurfaceTexture
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
 import android.os.Build
 import android.os.Environment
@@ -24,13 +29,14 @@ import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ConcurrentCamera.SingleCameraConfig
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
-import androidx.camera.core.UseCaseGroup
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -53,6 +59,7 @@ import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionThreshold
 import com.ichirocc.intervalbubblecamera.MovingTargets
+import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
@@ -90,8 +97,17 @@ class IntervalCaptureService : LifecycleService() {
     private var captureGroups: List<List<String>> = emptyList()
     private var boundCaptures: Map<String, ImageCapture> = emptyMap()
     private var boundCameras: Map<String, Camera> = emptyMap()
-    private var concurrentPairBound = false
-    private val consecutiveFailures = mutableMapOf<String, Int>()
+    private var extensionsManager: ExtensionsManager? = null
+    private val nightModeSwitch = NightModeSwitch()
+    private var latestLux: Float? = null
+    private var boundNight = false
+    private val lightListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            latestLux = event.values.firstOrNull()
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
     private var targetRotation = Surface.ROTATION_0
     private var captureJob: Job? = null
     private var bubbleOverlay: BubbleOverlay? = null
@@ -172,7 +188,6 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
-        consecutiveFailures.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
 
@@ -209,11 +224,24 @@ class IntervalCaptureService : LifecycleService() {
                 runCatching {
                     val provider = providerFuture.get()
                     cameraProvider = provider
-                    bindCameras(provider)
-                    CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
-                    CaptureStateStore.updateCameraSummary(cameraSummary())
-                    if (targetDetectorTried) publishDetectorSummary()
-                    startCaptureLoop(generation)
+                    val extensionsFuture = ExtensionsManager.getInstanceAsync(this, provider)
+                    extensionsFuture.addListener(
+                        {
+                            if (generation != sessionGeneration) return@addListener
+                            extensionsManager = runCatching { extensionsFuture.get() }
+                                .onFailure { Log.w(TAG, "Camera extensions unavailable", it) }
+                                .getOrNull()
+                            runCatching {
+                                bindCameras(provider)
+                                startLightSensor()
+                                CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
+                                CaptureStateStore.updateCameraSummary(cameraSummary())
+                                if (targetDetectorTried) publishDetectorSummary()
+                                startCaptureLoop(generation)
+                            }.onFailure { error -> failToStartCamera(error) }
+                        },
+                        ContextCompat.getMainExecutor(this),
+                    )
                 }.onFailure { error ->
                     Log.e(TAG, "Unable to initialize CameraX", error)
                     CaptureStateStore.markCaptureError(
@@ -230,34 +258,25 @@ class IntervalCaptureService : LifecycleService() {
      * 端末が公開しているカメラを全部使う。前後の 1 組は対応端末なら同時に撮り、
      * 残りのカメラは 1 台ずつ切り替えて撮る（同時に開けるのは最大 2 台のため）。
      */
+    private fun failToStartCamera(error: Throwable) {
+        Log.e(TAG, "Unable to start cameras", error)
+        CaptureStateStore.markCaptureError(
+            "カメラを開始できませんでした。別のアプリがカメラを使用していないか確認してください。",
+        )
+        stopAfterFatalError()
+    }
+
     private fun bindCameras(provider: ProcessCameraProvider) {
         cameraEntries = enumerateCameras(provider)
         check(cameraEntries.isNotEmpty()) { "No camera available" }
         provider.unbindAll()
         boundCaptures = emptyMap()
 
-        val pair = listOfNotNull(
-            cameraEntries.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK && !it.isPhysical },
-            cameraEntries.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_FRONT && !it.isPhysical },
-        ).map { it.key }
-        concurrentPairBound = false
-        if (pair.size == 2 && supportsFrontBackConcurrent(provider)) {
-            try {
-                bindGroup(provider, pair)
-                concurrentPairBound = true
-            } catch (error: RuntimeException) {
-                Log.w(TAG, "Concurrent front/back binding failed; switching instead", error)
-                provider.unbindAll()
-                boundCaptures = emptyMap()
-            }
-        }
-
-        captureGroups = if (concurrentPairBound) {
-            listOf(pair) + cameraEntries.filter { it.key !in pair }.map { listOf(it.key) }
-        } else {
-            cameraEntries.map { listOf(it.key) }
-        }
-        if (boundCaptures.isEmpty()) bindGroup(provider, captureGroups.first())
+        nightModeSwitch.reset()
+        // 前後同時撮影は使わない（Pixel 10 Pro XL では 1920×1440 に制限され、露出も合いにくい）。
+        // 全カメラを 1 台ずつ切り替えて、各カメラの最大解像度で撮る。
+        captureGroups = cameraEntries.map { listOf(it.key) }
+        bindGroup(provider, captureGroups.first())
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -272,7 +291,7 @@ class IntervalCaptureService : LifecycleService() {
             for (info in logical) {
                 val logicalId = Camera2CameraInfo.from(info).cameraId
                 val logicalKey = cameraKey(info.lensFacing, logicalId)
-                add(CameraEntry(logicalKey, info.cameraSelector, info.lensFacing, false))
+                add(CameraEntry(logicalKey, info.cameraSelector, info.lensFacing, false, nightSelectorFor(info.cameraSelector)))
                 candidates.add(candidateOf(logicalKey, null, info))
                 if (!info.isLogicalMultiCameraSupported) continue
                 // 広角・超広角・望遠などの物理カメラは、単独で公開されていないものだけ追加する。
@@ -286,7 +305,7 @@ class IntervalCaptureService : LifecycleService() {
                         .setPhysicalCameraId(physicalId)
                         .build()
                     val physicalKey = cameraKey(physical.lensFacing, physicalId)
-                    add(CameraEntry(physicalKey, selector, physical.lensFacing, true))
+                    add(CameraEntry(physicalKey, selector, physical.lensFacing, true, null))
                     candidates.add(candidateOf(physicalKey, logicalKey, physical))
                 }
             }
@@ -295,6 +314,18 @@ class IntervalCaptureService : LifecycleService() {
         val selected = CameraSelectionPolicy.select(candidates).toSet()
         Log.i(TAG, "Cameras: ${candidates.joinToString { it.key }} -> using $selected")
         return all.filter { it.key in selected }.ifEmpty { all }
+    }
+
+    /** 夜景モード（メーカーのカメラ拡張）に対応していれば、それを使う CameraSelector。 */
+    private fun nightSelectorFor(base: CameraSelector): CameraSelector? {
+        val manager = extensionsManager ?: return null
+        return runCatching {
+            if (manager.isExtensionAvailable(base, ExtensionMode.NIGHT)) {
+                manager.getExtensionEnabledCameraSelector(base, ExtensionMode.NIGHT)
+            } else {
+                null
+            }
+        }.onFailure { Log.w(TAG, "Night extension check failed", it) }.getOrNull()
     }
 
     @OptIn(ExperimentalCamera2Interop::class)
@@ -317,54 +348,103 @@ class IntervalCaptureService : LifecycleService() {
     private fun cameraKey(lensFacing: Int, cameraId: String): String =
         (if (lensFacing == CameraSelector.LENS_FACING_FRONT) LENS_FRONT else LENS_BACK) + cameraId
 
-    private fun supportsFrontBackConcurrent(provider: ProcessCameraProvider): Boolean {
-        if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)) return false
-        return provider.availableConcurrentCameraInfos.any { combination ->
-            combination.map { it.lensFacing }.toSet() ==
-                setOf(CameraSelector.LENS_FACING_BACK, CameraSelector.LENS_FACING_FRONT)
-        }
-    }
-
     private fun bindGroup(provider: ProcessCameraProvider, keys: List<String>) {
         provider.unbindAll()
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
         val captures = keys.associateWith { newImageCapture() }
-        val cameras = if (entries.size == 1) {
-            listOf(provider.bindToLifecycle(this, entries.single().selector, captures.getValue(keys.single())))
-        } else {
-            provider.bindToLifecycle(
-                entries.map { entry ->
-                    SingleCameraConfig(
-                        entry.selector,
-                        UseCaseGroup.Builder().addUseCase(captures.getValue(entry.key)).build(),
+        val night = wantsNight(keys)
+        val cameras = when {
+            night -> {
+                // 夜景モードは露出を合わせるために映像の流れが要るので、画面に出さないプレビューも一緒につなぐ。
+                val entry = entries.single()
+                listOf(
+                    provider.bindToLifecycle(
                         this,
-                    )
-                },
-            ).cameras
+                        entry.nightSelector!!,
+                        newHiddenPreview(),
+                        captures.getValue(entry.key),
+                    ),
+                )
+            }
+
+            else -> entries.map { entry ->
+                provider.bindToLifecycle(this, entry.selector, captures.getValue(entry.key))
+            }
         }
         boundCaptures = captures
         boundCameras = keys.zip(cameras).toMap()
+        boundNight = night
+    }
+
+    private fun wantsNight(keys: List<String>): Boolean =
+        nightModeSwitch.night && keys.size == 1 && cameraEntries.first { it.key == keys.single() }.nightSelector != null
+
+    /** 画面に表示しないプレビュー（夜景モードの露出合わせ用）。 */
+    private fun newHiddenPreview(): Preview = Preview.Builder().build().also { preview ->
+        preview.setSurfaceProvider(ContextCompat.getMainExecutor(this)) { request ->
+            val texture = SurfaceTexture(false).apply {
+                setDefaultBufferSize(request.resolution.width, request.resolution.height)
+            }
+            val surface = Surface(texture)
+            request.provideSurface(surface, ContextCompat.getMainExecutor(this)) {
+                surface.release()
+                texture.release()
+            }
+        }
+    }
+
+    private fun startLightSensor() {
+        val sensorManager = getSystemService(SensorManager::class.java)
+        val light = sensorManager?.getDefaultSensor(Sensor.TYPE_LIGHT)
+        if (light == null) {
+            Log.w(TAG, "No light sensor; night mode stays off")
+            return
+        }
+        sensorManager.registerListener(lightListener, light, SensorManager.SENSOR_DELAY_NORMAL)
+    }
+
+    private fun stopLightSensor() {
+        getSystemService(SensorManager::class.java)?.unregisterListener(lightListener)
+        latestLux = null
+    }
+
+    /**
+     * 照明の明るさで夜景モードと普通のモードを自動で切り替える。切り替えたら、夜景に対応するカメラの
+     * 比較用画像を捨てる（明るさが大きく変わり、動体と誤判定するため）。
+     */
+    private fun updateNightMode() {
+        val lux = latestLux ?: return
+        if (!nightModeSwitch.update(lux)) return
+        val night = nightModeSwitch.night
+        Log.i(TAG, "Lighting ${lux}lx -> ${if (night) "night" else "normal"} mode")
+        val nightCameras = cameraEntries.filter { it.nightSelector != null }.map { it.key }
+        nightCameras.forEach { motionReferences.remove(it) }
+        CaptureStateStore.updateCameraSummary(cameraSummary())
     }
 
     private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
         .setJpegQuality(deviceProfile.jpegQuality)
+        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
         .setTargetRotation(targetRotation)
         .build()
 
     private fun cameraSummary(): String {
-        val mode = if (concurrentPairBound) "前後同時＋切替" else "切替"
-        return "カメラ${cameraEntries.size}台（$mode）: ${cameraEntries.joinToString { it.key }}"
+        val nightCameras = cameraEntries.filter { it.nightSelector != null }.map { it.key }
+        val lighting = when {
+            nightCameras.isEmpty() -> "夜景モード非対応"
+            nightModeSwitch.night -> "夜景モード（${nightCameras.joinToString()}）"
+            else -> "普通のモード（暗いと${nightCameras.joinToString()}は夜景モード）"
+        }
+        return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting"
     }
 
     private fun runningDetail(intervalSeconds: Int): String {
         val count = cameraEntries.size
         val how = when {
             count == 1 -> "カメラ1台で撮影し"
-            concurrentPairBound && count == 2 -> "前後のカメラで同時に撮影し"
-            concurrentPairBound -> "カメラ${count}台で撮影し（前後は同時、ほかは順に切り替え）"
             else -> "カメラ${count}台を順に切り替えて撮影し"
         }
         return "${intervalSeconds}秒ごとに$how、どれかで動体があるときだけ全カメラの画像を保存します。"
@@ -401,6 +481,7 @@ class IntervalCaptureService : LifecycleService() {
      * どれかで動体があれば全カメラの画像を保存する。
      */
     private suspend fun captureWithMotionCheck(): PhotoResult {
+        updateNightMode()
         val shots = linkedMapOf<String, InMemoryResult.Captured>()
         val judgements = linkedMapOf<String, MotionResult?>()
         var firstFailure: String? = null
@@ -441,7 +522,8 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     /**
-     * 画像の変化で動きを拾い、端末内の検出で人（全身・体の一部・手だけ）や車などを確かめて追跡する。
+     * 全カメラで毎回、端末内の検出で人（全身・体の一部・手だけ）や車などを探して追跡し、
+     * 画像の変化と重なるか位置が動いた対象があれば動体とする。
      * 動いた対象があればその中心をピントの位置にする。検出を使えない端末では変化だけで判定する。
      */
     private suspend fun judgeMotion(
@@ -451,8 +533,7 @@ class IntervalCaptureService : LifecycleService() {
     ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
-        // 追跡中の対象がいれば変化が閾値未満でも検出し、ゆっくりした動きも追う。
-        if (!pixelMotion.motionDetected && !tracker.hasTracks) return pixelMotion
+        // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
         if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
             Log.w(TAG, "Thermal status ${powerManager.currentThermalStatus}; skipping detection")
@@ -465,8 +546,14 @@ class IntervalCaptureService : LifecycleService() {
             runCatching {
                 val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
                 val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
+                // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(detections) { box ->
-                    MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    if (pixelMotion.motionDetected) {
+                        MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    } else {
+                        0.0
+                    }
                 }
                 TargetTracker.focusTarget(tracked)
             }.fold(
@@ -500,32 +587,17 @@ class IntervalCaptureService : LifecycleService() {
         return targetDetector
     }
 
-    /**
-     * 撮れなかったカメラを数える。前後同時撮影の組で失敗が続いたら（Pixel 10 Pro XL では前面が
-     * 同時撮影で撮れない）、同時撮影をやめて 1 台ずつ切り替えて撮る。
-     */
     private fun recordFailures(failed: List<String>) {
-        cameraEntries.forEach { entry ->
-            consecutiveFailures[entry.key] = if (entry.key in failed) (consecutiveFailures[entry.key] ?: 0) + 1 else 0
-        }
         CaptureStateStore.updateFailedCameras(failed)
-        if (!concurrentPairBound) return
-        val pair = captureGroups.firstOrNull { it.size > 1 } ?: return
-        if (pair.any { (consecutiveFailures[it] ?: 0) >= MAX_CONCURRENT_FAILURES }) {
-            Log.w(TAG, "Concurrent capture keeps failing for $pair; switching cameras one by one")
-            concurrentPairBound = false
-            captureGroups = cameraEntries.map { listOf(it.key) }
-            CaptureStateStore.updateCameraSummary(cameraSummary())
-        }
     }
 
     /** 全カメラを組ごとに撮り、撮れた順に [onShot] へ渡す（呼び出し中はその組がつながっている）。 */
     private suspend fun forEachCameraGroup(onShot: suspend (key: String, shot: InMemoryResult) -> Unit) {
         val provider = cameraProvider
         // 今つながっている組から撮り、切り替えは 1 周につき (組の数 - 1) 回で済ませる。
-        val groups = captureGroups.sortedBy { it.toSet() != boundCaptures.keys }
+        val groups = captureGroups.sortedBy { !isBound(it) }
         for (group in groups) {
-            if (group.toSet() != boundCaptures.keys) {
+            if (!isBound(group)) {
                 val failure = when {
                     provider == null -> "カメラが準備されていません"
                     else -> try {
@@ -562,14 +634,20 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    /** 動いた位置にピント（と露出）を合わせて撮り直す。合わせられないカメラでは null。 */
+    private fun isBound(group: List<String>): Boolean =
+        group.toSet() == boundCaptures.keys && boundNight == wantsNight(group)
+
+    /** 動いた位置にピントを合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
         if (!focusAt(key, center)) return null
         val capture = boundCaptures[key] ?: return null
         return captureToMemory(capture) as? InMemoryResult.Captured
     }
 
-    /** 指定位置にピントと露出を合わせる。合わせられなかったら false。 */
+    /**
+     * 指定位置にピントだけを合わせる。露出は画面全体でカメラに任せる（小さな一点で露出を決めると、
+     * そこが暗いと画面全体が白飛びするため）。合わせられなかったら false。
+     */
     private suspend fun focusAt(key: String, center: MotionCenter): Boolean {
         val camera = boundCameras[key] ?: return false
         val capture = boundCaptures[key] ?: return false
@@ -578,7 +656,7 @@ class IntervalCaptureService : LifecycleService() {
                 .createPoint(center.x.toFloat(), center.y.toFloat())
             FocusMeteringAction.Builder(
                 point,
-                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+                FocusMeteringAction.FLAG_AF,
             ).disableAutoCancel().build()
         }.getOrNull() ?: return false
         if (!camera.cameraInfo.isFocusMeteringSupported(action)) return false
@@ -749,8 +827,8 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
-        consecutiveFailures.clear()
         orientationListener.disable()
+        stopLightSensor()
         releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
@@ -768,8 +846,8 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
-        consecutiveFailures.clear()
         orientationListener.disable()
+        stopLightSensor()
         releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
@@ -823,6 +901,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob?.cancel()
         cameraProvider?.unbindAll()
         orientationListener.disable()
+        stopLightSensor()
         releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
@@ -848,6 +927,8 @@ class IntervalCaptureService : LifecycleService() {
         val selector: CameraSelector,
         val lensFacing: Int,
         val isPhysical: Boolean,
+        /** 夜景モード用の CameraSelector（非対応なら null）。 */
+        val nightSelector: CameraSelector?,
     )
 
     private sealed interface InMemoryResult {
@@ -873,8 +954,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
-        private const val CAPTURE_TIMEOUT_MS = 8_000L
-        private const val MAX_CONCURRENT_FAILURES = 2
+        // 夜景モードは 1 枚に数秒かかるため長めに待つ。
+        private const val CAPTURE_TIMEOUT_MS = 15_000L
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
         private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)

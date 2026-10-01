@@ -3,7 +3,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:clipToPadding="false"
+    android:clipToPadding="true"
     android:fillViewport="true">
 
     <LinearLayout
@@ -237,6 +237,7 @@
                 android:layout_height="wrap_content"
                 android:max="95"
                 android:progressTint="@color/primary"
+                android:progressBackgroundTint="@color/outline"
                 android:thumbTint="@color/primary" />
 
             <LinearLayout
@@ -269,6 +270,7 @@
                 android:layout_height="wrap_content"
                 android:max="199"
                 android:progressTint="@color/primary"
+                android:progressBackgroundTint="@color/outline"
                 android:thumbTint="@color/primary" />
 
             <TextView
@@ -308,6 +310,7 @@
                     android:layout_width="64dp"
                     android:layout_height="64dp"
                     android:contentDescription="@string/section_icon_color"
+                    android:scaleType="fitCenter"
                     android:src="@drawable/ic_app_icon" />
 
                 <LinearLayout
@@ -357,6 +360,7 @@
                         android:background="@drawable/bg_icon_color_selected"
                         android:contentDescription="@string/icon_color_blue"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon" />
 
                     <ImageButton
@@ -367,6 +371,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_green"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_green" />
 
                     <ImageButton
@@ -377,6 +382,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_red"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_red" />
 
                     <ImageButton
@@ -387,6 +393,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_orange"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_orange" />
                 </LinearLayout>
 
@@ -405,6 +412,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_purple"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_purple" />
 
                     <ImageButton
@@ -415,6 +423,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_pink"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_pink" />
 
                     <ImageButton
@@ -425,6 +434,7 @@
                         android:background="@android:color/transparent"
                         android:contentDescription="@string/icon_color_black"
                         android:padding="5dp"
+                        android:scaleType="fitCenter"
                         android:src="@drawable/ic_app_icon_black" />
                 </LinearLayout>
             </LinearLayout>

@@ -2,13 +2,13 @@ package com.ichirocc.intervalbubblecamera
 
 import android.Manifest
 import android.content.ActivityNotFoundException
-import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.os.Bundle
 import android.provider.MediaStore
 import android.provider.Settings
+import android.view.ViewGroup
 import android.widget.ImageButton
 import android.widget.ImageView
 import android.widget.SeekBar
@@ -20,7 +20,10 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
+import androidx.core.view.updatePadding
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -97,6 +100,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        applySystemBarInsets()
         bindViews()
         restorePreferences()
         configureControls()
@@ -107,6 +111,21 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermissionStatus()
+    }
+
+    /**
+     * Android 15 以降は画面がステータスバー・ナビゲーションバーの下まで広がるので、
+     * その分の余白を取り、文字やボタンがバーに重ならないようにする。
+     */
+    private fun applySystemBarInsets() {
+        val root = (findViewById<ViewGroup>(android.R.id.content)).getChildAt(0)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            view.updatePadding(left = bars.left, top = bars.top, right = bars.right, bottom = bars.bottom)
+            insets
+        }
     }
 
     private fun bindViews() {
@@ -164,7 +183,6 @@ class MainActivity : AppCompatActivity() {
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
         )
         renderIconColor()
-        updateLauncherIcon(selectedIconColor, showFailure = false)
     }
 
     private fun configureControls() {
@@ -385,7 +403,6 @@ class MainActivity : AppCompatActivity() {
         selectedIconColor = color
         preferences.edit { putString(KEY_ICON_COLOR, color.storageKey) }
         renderIconColor()
-        updateLauncherIcon(color, showFailure = true)
 
         if (CaptureStateStore.state.value.isActive) {
             runCatching {
@@ -421,28 +438,6 @@ class MainActivity : AppCompatActivity() {
                 if (selected) R.drawable.bg_icon_color_selected else android.R.color.transparent,
             )
         }
-    }
-
-    private fun updateLauncherIcon(color: AppIconColor, showFailure: Boolean) {
-        val updates = AppIconColor.entries.map { candidate ->
-            PackageManager.ComponentEnabledSetting(
-                ComponentName(
-                    packageName,
-                    "$packageName.${candidate.launcherAliasSuffix}",
-                ),
-                if (candidate == color) {
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                } else {
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-                },
-                PackageManager.DONT_KILL_APP,
-            )
-        }
-
-        runCatching { packageManager.setComponentEnabledSettings(updates) }
-            .onFailure {
-                if (showFailure) showMessage(getString(R.string.launcher_icon_update_failed))
-            }
     }
 
     private fun refreshPermissionStatus() {
