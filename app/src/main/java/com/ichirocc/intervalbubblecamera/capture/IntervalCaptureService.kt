@@ -61,7 +61,6 @@ class IntervalCaptureService : LifecycleService() {
     private var currentIntervalSeconds = IntervalPolicy.DEFAULT_SECONDS
     private var currentLensFacing = LENS_BACK
     private var currentIconColor = AppIconColor.DEFAULT
-    private var motionEnabled = false
     private var motionSensitivity = MotionSensitivity.DEFAULT
     private var motionReference: LumaFrame? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -97,11 +96,10 @@ class IntervalCaptureService : LifecycleService() {
                 val iconColor = AppIconColor.fromStorageKey(
                     intent.getStringExtra(EXTRA_ICON_COLOR),
                 )
-                val motion = intent.getBooleanExtra(EXTRA_MOTION_ENABLED, false)
                 val sensitivity = MotionSensitivity.fromStorageKey(
                     intent.getStringExtra(EXTRA_MOTION_SENSITIVITY),
                 )
-                startCapture(interval, lens, iconColor, motion, sensitivity)
+                startCapture(interval, lens, iconColor, sensitivity)
             }
 
             ACTION_UPDATE_ICON_COLOR -> updateIconColor(
@@ -119,7 +117,6 @@ class IntervalCaptureService : LifecycleService() {
         intervalSeconds: Int,
         lensFacing: String,
         iconColor: AppIconColor,
-        motion: Boolean,
         sensitivity: MotionSensitivity,
     ) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
@@ -133,7 +130,6 @@ class IntervalCaptureService : LifecycleService() {
         currentIntervalSeconds = intervalSeconds
         currentLensFacing = lensFacing
         currentIconColor = iconColor
-        motionEnabled = motion
         motionSensitivity = sensitivity
         motionReference = null
         sessionGeneration += 1
@@ -142,7 +138,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob?.cancel()
         cameraProvider?.unbindAll()
         imageCapture = null
-        CaptureStateStore.markStarting(intervalSeconds, lensFacing, motion)
+        CaptureStateStore.markStarting(intervalSeconds, lensFacing)
 
         try {
             startAsCameraForegroundService()
@@ -173,7 +169,7 @@ class IntervalCaptureService : LifecycleService() {
                     val provider = providerFuture.get()
                     cameraProvider = provider
                     bindCamera(provider, lensFacing)
-                    CaptureStateStore.markRunning(intervalSeconds, lensFacing, motion)
+                    CaptureStateStore.markRunning(intervalSeconds, lensFacing)
                     updateForegroundNotification()
                     startCaptureLoop(generation)
                 }.onFailure { error ->
@@ -217,7 +213,7 @@ class IntervalCaptureService : LifecycleService() {
             while (isActive && generation == sessionGeneration) {
                 refreshWakeLock()
                 val startedAt = SystemClock.elapsedRealtime()
-                val result = if (motionEnabled) captureWithMotionCheck() else captureOnePhoto()
+                val result = captureWithMotionCheck()
                 if (generation != sessionGeneration) break
                 when (result) {
                     is PhotoResult.Saved -> {
@@ -244,46 +240,6 @@ class IntervalCaptureService : LifecycleService() {
                 delay(IntervalPolicy.delayAfterCapture(currentIntervalSeconds, captureDuration))
             }
         }
-    }
-
-    private suspend fun captureOnePhoto(): PhotoResult = suspendCancellableCoroutine { continuation ->
-        val capture = imageCapture
-        if (capture == null) {
-            continuation.resume(PhotoResult.Failed("カメラが準備されていません"))
-            return@suspendCancellableCoroutine
-        }
-
-        val fileName = "IBC_${FILE_DATE_FORMAT.format(Date())}.jpg"
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            put(
-                MediaStore.Images.Media.RELATIVE_PATH,
-                "${Environment.DIRECTORY_PICTURES}/$ALBUM_NAME",
-            )
-        }
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(
-            contentResolver,
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            values,
-        ).build()
-
-        capture.takePicture(
-            outputOptions,
-            captureExecutor,
-            object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(outputFileResults: ImageCapture.OutputFileResults) {
-                    if (continuation.isActive) continuation.resume(PhotoResult.Saved(fileName))
-                }
-
-                override fun onError(exception: ImageCaptureException) {
-                    Log.w(TAG, "Photo capture failed", exception)
-                    if (continuation.isActive) {
-                        continuation.resume(PhotoResult.Failed(exception.message ?: "不明なエラー"))
-                    }
-                }
-            },
-        )
     }
 
     /** 前回の撮影画像と比べ、動体があったときだけ今回の画像を保存する。 */
@@ -498,11 +454,8 @@ class IntervalCaptureService : LifecycleService() {
             Intent(this, IntervalCaptureService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notificationText = overrideText ?: if (motionEnabled) {
-            "${currentIntervalSeconds}秒ごとに動体検知・${state.photoCount}枚保存"
-        } else {
-            "${currentIntervalSeconds}秒ごと・${state.photoCount}枚保存"
-        }
+        val notificationText = overrideText
+            ?: "${currentIntervalSeconds}秒ごとに動体検知・${state.photoCount}枚保存"
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_camera)
@@ -555,7 +508,6 @@ class IntervalCaptureService : LifecycleService() {
         const val EXTRA_INTERVAL_SECONDS = "interval_seconds"
         const val EXTRA_LENS_FACING = "lens_facing"
         const val EXTRA_ICON_COLOR = "icon_color"
-        const val EXTRA_MOTION_ENABLED = "motion_enabled"
         const val EXTRA_MOTION_SENSITIVITY = "motion_sensitivity"
         const val LENS_BACK = "back"
         const val LENS_FRONT = "front"

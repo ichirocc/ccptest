@@ -15,7 +15,6 @@ data class CaptureUiState(
     val phase: CapturePhase = CapturePhase.IDLE,
     val intervalSeconds: Int = 10,
     val lensFacing: String = IntervalCaptureService.LENS_BACK,
-    val motionEnabled: Boolean = false,
     val photoCount: Int = 0,
     val skippedCount: Int = 0,
     val lastPhotoName: String? = null,
@@ -29,23 +28,21 @@ object CaptureStateStore {
     private val mutableState = MutableStateFlow(CaptureUiState())
     val state: StateFlow<CaptureUiState> = mutableState.asStateFlow()
 
-    fun markStarting(intervalSeconds: Int, lensFacing: String, motionEnabled: Boolean) {
+    fun markStarting(intervalSeconds: Int, lensFacing: String) {
         mutableState.value = CaptureUiState(
             phase = CapturePhase.STARTING,
             intervalSeconds = intervalSeconds,
             lensFacing = lensFacing,
-            motionEnabled = motionEnabled,
             detail = "カメラを準備しています…",
         )
     }
 
-    fun markRunning(intervalSeconds: Int, lensFacing: String, motionEnabled: Boolean) {
+    fun markRunning(intervalSeconds: Int, lensFacing: String) {
         mutableState.value = mutableState.value.copy(
             phase = CapturePhase.RUNNING,
             intervalSeconds = intervalSeconds,
             lensFacing = lensFacing,
-            motionEnabled = motionEnabled,
-            detail = runningDetail(intervalSeconds, motionEnabled),
+            detail = "${intervalSeconds}秒ごとに撮影し、前回と比べて動体があるときだけ保存します。",
         )
     }
 
@@ -55,11 +52,7 @@ object CaptureStateStore {
             phase = CapturePhase.RUNNING,
             photoCount = current.photoCount + 1,
             lastPhotoName = fileName,
-            detail = if (current.motionEnabled) {
-                "動体を検知して保存しました（見送り${current.skippedCount}枚）。"
-            } else {
-                runningDetail(current.intervalSeconds, motionEnabled = false)
-            },
+            detail = "動体を検知して保存しました（見送り${current.skippedCount}枚）。",
         )
     }
 
@@ -79,13 +72,6 @@ object CaptureStateStore {
             detail = "動体なしのため保存を見送りました（変化${"%.1f".format(changedRatio * 100)}%・見送り${skipped}枚）。",
         )
     }
-
-    private fun runningDetail(intervalSeconds: Int, motionEnabled: Boolean): String =
-        if (motionEnabled) {
-            "${intervalSeconds}秒ごとに撮影し、前回と比べて動体があるときだけ保存します。"
-        } else {
-            "${intervalSeconds}秒ごとに自動撮影しています。"
-        }
 
     fun markCaptureError(message: String) {
         mutableState.value = mutableState.value.copy(

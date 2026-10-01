@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name">インターバル・バブルカメラ</string>
     <string name="screen_title">インターバル・バブルカメラ</string>
-    <string name="screen_subtitle">指定した間隔で自動撮影し、他のアプリ使用中や画面ロック中も撮影を継続します。</string>
+    <string name="screen_subtitle">指定した間隔で撮影して前回の画像と比べ、動体があったときだけ保存します。他のアプリ使用中や画面ロック中も継続します。</string>
     <string name="status_idle">待機中</string>
     <string name="status_starting">準備中</string>
     <string name="status_running">撮影中</string>
@@ -22,8 +22,7 @@
     <string name="camera_back">背面カメラ</string>
     <string name="camera_front">前面カメラ</string>
     <string name="section_motion">動体検知</string>
-    <string name="motion_switch">動体があるときだけ保存</string>
-    <string name="motion_description">撮影ごとに前回の画像と比べ、変化があったときだけ保存します。最初の1枚は比較用で保存しません。</string>
+    <string name="motion_description">撮影ごとに前回の画像と比べ、動体があったときだけ保存します。最初の1枚は比較用で保存しません。</string>
     <string name="motion_sensitivity_low">感度 低</string>
     <string name="motion_sensitivity_medium">感度 中</string>
     <string name="motion_sensitivity_high">感度 高</string>

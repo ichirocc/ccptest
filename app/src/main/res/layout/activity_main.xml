@@ -220,18 +220,9 @@
             android:orientation="vertical"
             android:padding="16dp">
 
-            <com.google.android.material.materialswitch.MaterialSwitch
-                android:id="@+id/motionSwitch"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/motion_switch"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp" />
-
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
                 android:text="@string/motion_description"
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
