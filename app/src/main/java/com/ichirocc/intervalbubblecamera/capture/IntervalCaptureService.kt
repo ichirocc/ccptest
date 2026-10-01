@@ -441,7 +441,8 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     /**
-     * 画像の変化で動きを拾い、端末内の検出で人（全身・体の一部・手だけ）や車などを確かめて追跡する。
+     * 全カメラで毎回、端末内の検出で人（全身・体の一部・手だけ）や車などを探して追跡し、
+     * 画像の変化と重なるか位置が動いた対象があれば動体とする。
      * 動いた対象があればその中心をピントの位置にする。検出を使えない端末では変化だけで判定する。
      */
     private suspend fun judgeMotion(
@@ -451,8 +452,7 @@ class IntervalCaptureService : LifecycleService() {
     ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
-        // 追跡中の対象がいれば変化が閾値未満でも検出し、ゆっくりした動きも追う。
-        if (!pixelMotion.motionDetected && !tracker.hasTracks) return pixelMotion
+        // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
         if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
             Log.w(TAG, "Thermal status ${powerManager.currentThermalStatus}; skipping detection")
