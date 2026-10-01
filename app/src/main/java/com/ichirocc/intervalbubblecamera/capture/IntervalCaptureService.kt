@@ -19,12 +19,15 @@ import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ConcurrentCamera.SingleCameraConfig
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
+import androidx.camera.core.SurfaceOrientedMeteringPointFactory
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.app.NotificationCompat
@@ -33,12 +36,16 @@ import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
+import com.ichirocc.intervalbubblecamera.MotionCenter
+import com.ichirocc.intervalbubblecamera.MotionDetector
+import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionSensitivity
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
@@ -51,6 +58,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -66,6 +74,7 @@ class IntervalCaptureService : LifecycleService() {
     private var cameraEntries: List<CameraEntry> = emptyList()
     private var captureGroups: List<List<String>> = emptyList()
     private var boundCaptures: Map<String, ImageCapture> = emptyMap()
+    private var boundCameras: Map<String, Camera> = emptyMap()
     private var concurrentPairBound = false
     private var targetRotation = Surface.ROTATION_0
     private var captureJob: Job? = null
@@ -269,10 +278,11 @@ class IntervalCaptureService : LifecycleService() {
     private fun bindGroup(provider: ProcessCameraProvider, keys: List<String>) {
         provider.unbindAll()
         boundCaptures = emptyMap()
+        boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
         val captures = keys.associateWith { newImageCapture() }
-        if (entries.size == 1) {
-            provider.bindToLifecycle(this, entries.single().selector, captures.getValue(keys.single()))
+        val cameras = if (entries.size == 1) {
+            listOf(provider.bindToLifecycle(this, entries.single().selector, captures.getValue(keys.single())))
         } else {
             provider.bindToLifecycle(
                 entries.map { entry ->
@@ -282,9 +292,10 @@ class IntervalCaptureService : LifecycleService() {
                         this,
                     )
                 },
-            )
+            ).cameras
         }
         boundCaptures = captures
+        boundCameras = keys.zip(cameras).toMap()
     }
 
     private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
@@ -339,30 +350,37 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    /** カメラごとに前回の画像と比べ、どれかで動体があれば全カメラの画像を保存する。 */
+    /**
+     * カメラごとに前回の画像と比べ、動体を検知したカメラはその位置にピントを合わせて撮り直す。
+     * どれかで動体があれば全カメラの画像を保存する。
+     */
     private suspend fun captureWithMotionCheck(): PhotoResult {
-        val shots = captureCameraSet()
-        val captured = shots.mapNotNull { (lens, shot) ->
-            (shot as? InMemoryResult.Captured)?.let { lens to it }
-        }.toMap()
-        if (captured.isEmpty()) {
-            val message = shots.values.filterIsInstance<InMemoryResult.Failed>()
-                .firstOrNull()?.message ?: "カメラが準備されていません"
-            return PhotoResult.Failed(message)
+        val shots = linkedMapOf<String, InMemoryResult.Captured>()
+        val judgements = linkedMapOf<String, MotionResult?>()
+        var firstFailure: String? = null
+
+        forEachCameraGroup { key, shot ->
+            if (shot is InMemoryResult.Failed) {
+                if (firstFailure == null) firstFailure = shot.message
+                return@forEachCameraGroup
+            }
+            var captured = shot as InMemoryResult.Captured
+            val judgement = motionReferences[key]?.let {
+                MotionDetector.compare(it, captured.frame, motionSensitivity)
+            }
+            val center = judgement?.center
+            if (center != null) captured = refocusAndRetake(key, center) ?: captured
+            motionReferences[key] = captured.frame
+            shots[key] = captured
+            judgements[key] = judgement
         }
+        if (shots.isEmpty()) return PhotoResult.Failed(firstFailure ?: "カメラが準備されていません")
 
-        val decision = CameraSetMotion.decide(
-            previous = motionReferences.toMap(),
-            current = captured.mapValues { it.value.frame },
-            sensitivity = motionSensitivity,
-        )
-        captured.forEach { (lens, shot) -> motionReferences[lens] = shot.frame }
-
-        return when (decision) {
+        return when (val decision = CameraSetMotion.decide(judgements)) {
             CameraSetDecision.Baseline -> PhotoResult.Baseline
             is CameraSetDecision.NoMotion -> PhotoResult.NoMotion(decision.maxChangedRatio)
             is CameraSetDecision.Motion -> withContext(Dispatchers.IO) {
-                runCatching { saveCameraSet(captured) }
+                runCatching { saveCameraSet(shots) }
                     .getOrElse { error ->
                         Log.w(TAG, "Unable to save motion photos", error)
                         PhotoResult.Failed(error.message ?: "保存に失敗しました")
@@ -371,34 +389,73 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    private suspend fun captureCameraSet(): Map<String, InMemoryResult> {
+    /** 全カメラを組ごとに撮り、撮れた順に [onShot] へ渡す（呼び出し中はその組がつながっている）。 */
+    private suspend fun forEachCameraGroup(onShot: suspend (key: String, shot: InMemoryResult) -> Unit) {
         val provider = cameraProvider
-        val results = linkedMapOf<String, InMemoryResult>()
         // 今つながっている組から撮り、切り替えは 1 周につき (組の数 - 1) 回で済ませる。
         val groups = captureGroups.sortedBy { it.toSet() != boundCaptures.keys }
         for (group in groups) {
             if (group.toSet() != boundCaptures.keys) {
-                if (provider == null) {
-                    group.forEach { results[it] = InMemoryResult.Failed("カメラが準備されていません") }
-                    continue
+                val failure = when {
+                    provider == null -> "カメラが準備されていません"
+                    else -> try {
+                        bindGroup(provider, group)
+                        null
+                    } catch (error: RuntimeException) {
+                        Log.w(TAG, "Unable to switch to cameras $group", error)
+                        "カメラを切り替えられませんでした"
+                    }
                 }
-                try {
-                    bindGroup(provider, group)
-                } catch (error: RuntimeException) {
-                    Log.w(TAG, "Unable to switch to cameras $group", error)
-                    group.forEach { results[it] = InMemoryResult.Failed("カメラを切り替えられませんでした") }
+                if (failure != null) {
+                    group.forEach { onShot(it, InMemoryResult.Failed(failure)) }
                     continue
                 }
                 // 切り替え直後は露出が合っておらず、暗い画像を動体と誤判定するため待つ。
                 delay(SWITCH_SETTLE_MS)
             }
             val captures = boundCaptures
-            coroutineScope {
+            val taken = coroutineScope {
                 group.map { key -> key to async { captureToMemory(captures.getValue(key)) } }
-                    .forEach { (key, pending) -> results[key] = pending.await() }
+                    .map { (key, pending) -> key to pending.await() }
             }
+            taken.forEach { (key, shot) -> onShot(key, shot) }
         }
-        return results
+    }
+
+    /** 動いた位置にピント（と露出）を合わせて撮り直す。合わせられないカメラでは null。 */
+    private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
+        val camera = boundCameras[key] ?: return null
+        val capture = boundCaptures[key] ?: return null
+        val action = runCatching {
+            val point = SurfaceOrientedMeteringPointFactory(1f, 1f, capture)
+                .createPoint(center.x.toFloat(), center.y.toFloat())
+            FocusMeteringAction.Builder(
+                point,
+                FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
+            ).disableAutoCancel().build()
+        }.getOrNull() ?: return null
+        if (!camera.cameraInfo.isFocusMeteringSupported(action)) return null
+
+        val focused = withTimeoutOrNull(FOCUS_TIMEOUT_MS) {
+            runCatching { camera.cameraControl.startFocusAndMetering(action).await() }
+                .onFailure { Log.w(TAG, "Focus on motion failed for $key", it) }
+                .isSuccess
+        } ?: false
+        if (!focused) return null
+        return captureToMemory(capture) as? InMemoryResult.Captured
+    }
+
+    private suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { continuation ->
+        addListener(
+            {
+                val result = runCatching { get() }
+                if (continuation.isActive) {
+                    result.fold({ continuation.resume(it) }, { continuation.resumeWith(Result.failure(it)) })
+                }
+            },
+            ContextCompat.getMainExecutor(this@IntervalCaptureService),
+        )
+        continuation.invokeOnCancellation { cancel(false) }
     }
 
     private suspend fun captureToMemory(capture: ImageCapture): InMemoryResult =
@@ -539,6 +596,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob = null
         cameraProvider?.unbindAll()
         boundCaptures = emptyMap()
+        boundCameras = emptyMap()
         motionReferences.clear()
         orientationListener.disable()
         releaseWakeLock()
@@ -554,6 +612,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob = null
         cameraProvider?.unbindAll()
         boundCaptures = emptyMap()
+        boundCameras = emptyMap()
         motionReferences.clear()
         orientationListener.disable()
         releaseWakeLock()
@@ -662,6 +721,7 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val SWITCH_SETTLE_MS = 800L
+        private const val FOCUS_TIMEOUT_MS = 2_000L
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
         private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
     }

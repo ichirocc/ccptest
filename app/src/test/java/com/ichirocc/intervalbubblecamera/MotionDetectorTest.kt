@@ -31,6 +31,21 @@ class MotionDetectorTest {
     }
 
     @Test
+    fun `motion center points at the moving object`() {
+        val withObject = frame { x, y ->
+            if (x in 60 until 70 && y in 5 until 15) 250 else (x * 2 + y) % 200 + 20
+        }
+        val center = MotionDetector.compare(background, withObject, MotionSensitivity.MEDIUM).center!!
+        assertEquals(65.0 / width, center.x, 0.02)
+        assertEquals(10.0 / height, center.y, 0.02)
+    }
+
+    @Test
+    fun `no center is reported without motion`() {
+        assertEquals(null, MotionDetector.compare(background, background, MotionSensitivity.HIGH).center)
+    }
+
+    @Test
     fun `global brightness change from auto exposure is ignored`() {
         val brighter = frame { x, y -> (x * 2 + y) % 200 + 20 + 30 }
         val result = MotionDetector.compare(background, brighter, MotionSensitivity.HIGH)
@@ -71,52 +86,39 @@ class MotionDetectorTest {
 }
 
 class CameraSetMotionTest {
-    private val width = MotionDetector.GRID_WIDTH
-    private val height = MotionDetector.GRID_HEIGHT
-
-    private fun frame(fill: (x: Int, y: Int) -> Int): LumaFrame =
-        LumaFrame(width, height, IntArray(width * height) { fill(it % width, it / width) })
-
-    private val still = frame { x, y -> (x + y) % 150 + 40 }
-    private val moved = frame { x, y -> if (x in 20 until 40 && y in 10 until 30) 250 else (x + y) % 150 + 40 }
+    private fun result(motion: Boolean, ratio: Double = if (motion) 0.05 else 0.001) =
+        MotionResult(ratio, motion, if (motion) MotionCenter(0.5, 0.5) else null)
 
     @Test
     fun `first cycle is a baseline`() {
-        val decision = CameraSetMotion.decide(
-            previous = emptyMap(),
-            current = mapOf("back" to still, "front" to still),
-            sensitivity = MotionSensitivity.MEDIUM,
-        )
+        val decision = CameraSetMotion.decide(mapOf("back0" to null, "front1" to null))
         assertEquals(CameraSetDecision.Baseline, decision)
     }
 
     @Test
-    fun `motion on either camera triggers the set`() {
+    fun `motion on any camera triggers the set`() {
         val decision = CameraSetMotion.decide(
-            previous = mapOf("back" to still, "front" to still),
-            current = mapOf("back" to still, "front" to moved),
-            sensitivity = MotionSensitivity.MEDIUM,
+            mapOf(
+                "back0" to result(false),
+                "back2" to result(false),
+                "back3" to result(true),
+                "front1" to result(false),
+            ),
         )
-        assertEquals(CameraSetDecision.Motion(setOf("front")), decision)
+        assertEquals(CameraSetDecision.Motion(setOf("back3")), decision)
     }
 
     @Test
-    fun `no motion on any camera skips the set`() {
+    fun `no motion on any camera skips the set with the largest change`() {
         val decision = CameraSetMotion.decide(
-            previous = mapOf("back" to still, "front" to still),
-            current = mapOf("back" to still, "front" to still),
-            sensitivity = MotionSensitivity.HIGH,
+            mapOf("back0" to result(false, 0.002), "front1" to result(false, 0.004)),
         )
-        assertTrue(decision is CameraSetDecision.NoMotion)
+        assertEquals(CameraSetDecision.NoMotion(0.004), decision)
     }
 
     @Test
     fun `a camera without a previous frame is not judged`() {
-        val decision = CameraSetMotion.decide(
-            previous = mapOf("back" to still),
-            current = mapOf("back" to still, "front" to moved),
-            sensitivity = MotionSensitivity.MEDIUM,
-        )
+        val decision = CameraSetMotion.decide(mapOf("back0" to result(false), "front1" to null))
         assertTrue(decision is CameraSetDecision.NoMotion)
     }
 }

@@ -11,7 +11,14 @@ class LumaFrame(val width: Int, val height: Int, val pixels: IntArray) {
     }
 }
 
-data class MotionResult(val changedRatio: Double, val motionDetected: Boolean)
+/** 動いた画素の重心。画像の左上が (0, 0)、右下が (1, 1)。 */
+data class MotionCenter(val x: Double, val y: Double)
+
+data class MotionResult(
+    val changedRatio: Double,
+    val motionDetected: Boolean,
+    val center: MotionCenter? = null,
+)
 
 enum class MotionSensitivity(
     val storageKey: String,
@@ -52,13 +59,26 @@ object MotionDetector {
         val shift = meanShift.roundToInt()
 
         var changed = 0
+        var sumX = 0L
+        var sumY = 0L
         for (i in 0 until count) {
             if (abs(current.pixels[i] - previous.pixels[i] - shift) > sensitivity.pixelThreshold) {
                 changed++
+                sumX += i % current.width
+                sumY += i / current.width
             }
         }
         val ratio = changed.toDouble() / count
-        return MotionResult(ratio, ratio >= sensitivity.areaThreshold)
+        val detected = ratio >= sensitivity.areaThreshold
+        val center = if (detected) {
+            MotionCenter(
+                x = (sumX.toDouble() / changed + 0.5) / current.width,
+                y = (sumY.toDouble() / changed + 0.5) / current.height,
+            )
+        } else {
+            null
+        }
+        return MotionResult(ratio, detected, center)
     }
 
     fun lumaOf(argb: Int): Int {
@@ -78,17 +98,11 @@ sealed interface CameraSetDecision {
 
 object CameraSetMotion {
     /**
-     * カメラごとに前回の画像と比べ、どれか 1 台でも動体を検知したら Motion を返す。
-     * 前回の画像が無いカメラは判定に使わない（全台とも無ければ Baseline）。
+     * カメラごとの判定結果（前回の画像が無いカメラは null）をまとめ、どれか 1 台でも
+     * 動体を検知したら Motion を返す。全台とも前回の画像が無ければ Baseline。
      */
-    fun decide(
-        previous: Map<String, LumaFrame>,
-        current: Map<String, LumaFrame>,
-        sensitivity: MotionSensitivity,
-    ): CameraSetDecision {
-        val results = current.mapNotNull { (camera, frame) ->
-            previous[camera]?.let { camera to MotionDetector.compare(it, frame, sensitivity) }
-        }
+    fun decide(perCamera: Map<String, MotionResult?>): CameraSetDecision {
+        val results = perCamera.mapNotNull { (camera, result) -> result?.let { camera to it } }
         if (results.isEmpty()) return CameraSetDecision.Baseline
 
         val detectedBy = results.filter { it.second.motionDetected }.map { it.first }.toSet()
