@@ -84,6 +84,7 @@ class IntervalCaptureService : LifecycleService() {
     private var currentIconColor = AppIconColor.DEFAULT
     private var motionSensitivity = MotionSensitivity.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
+    private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var orientationListener: OrientationEventListener
 
@@ -149,6 +150,7 @@ class IntervalCaptureService : LifecycleService() {
         currentIconColor = iconColor
         motionSensitivity = sensitivity
         motionReferences.clear()
+        lastMotionCenters.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
 
@@ -369,7 +371,10 @@ class IntervalCaptureService : LifecycleService() {
                 MotionDetector.compare(it, captured.frame, motionSensitivity)
             }
             val center = judgement?.center
-            if (center != null) captured = refocusAndRetake(key, center) ?: captured
+            if (center != null) {
+                lastMotionCenters[key] = center
+                captured = refocusAndRetake(key, center) ?: captured
+            }
             motionReferences[key] = captured.frame
             shots[key] = captured
             judgements[key] = judgement
@@ -415,8 +420,13 @@ class IntervalCaptureService : LifecycleService() {
             }
             val captures = boundCaptures
             val taken = coroutineScope {
-                group.map { key -> key to async { captureToMemory(captures.getValue(key)) } }
-                    .map { (key, pending) -> key to pending.await() }
+                group.map { key ->
+                    key to async {
+                        // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
+                        focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
+                        captureToMemory(captures.getValue(key))
+                    }
+                }.map { (key, pending) -> key to pending.await() }
             }
             taken.forEach { (key, shot) -> onShot(key, shot) }
         }
@@ -424,8 +434,15 @@ class IntervalCaptureService : LifecycleService() {
 
     /** 動いた位置にピント（と露出）を合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
-        val camera = boundCameras[key] ?: return null
+        if (!focusAt(key, center)) return null
         val capture = boundCaptures[key] ?: return null
+        return captureToMemory(capture) as? InMemoryResult.Captured
+    }
+
+    /** 指定位置にピントと露出を合わせる。合わせられなかったら false。 */
+    private suspend fun focusAt(key: String, center: MotionCenter): Boolean {
+        val camera = boundCameras[key] ?: return false
+        val capture = boundCaptures[key] ?: return false
         val action = runCatching {
             val point = SurfaceOrientedMeteringPointFactory(1f, 1f, capture)
                 .createPoint(center.x.toFloat(), center.y.toFloat())
@@ -433,16 +450,14 @@ class IntervalCaptureService : LifecycleService() {
                 point,
                 FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE,
             ).disableAutoCancel().build()
-        }.getOrNull() ?: return null
-        if (!camera.cameraInfo.isFocusMeteringSupported(action)) return null
+        }.getOrNull() ?: return false
+        if (!camera.cameraInfo.isFocusMeteringSupported(action)) return false
 
-        val focused = withTimeoutOrNull(FOCUS_TIMEOUT_MS) {
+        return withTimeoutOrNull(FOCUS_TIMEOUT_MS) {
             runCatching { camera.cameraControl.startFocusAndMetering(action).await() }
-                .onFailure { Log.w(TAG, "Focus on motion failed for $key", it) }
+                .onFailure { Log.w(TAG, "Focus failed for $key", it) }
                 .isSuccess
         } ?: false
-        if (!focused) return null
-        return captureToMemory(capture) as? InMemoryResult.Captured
     }
 
     private suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { continuation ->
@@ -598,6 +613,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         motionReferences.clear()
+        lastMotionCenters.clear()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()
@@ -614,6 +630,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         motionReferences.clear()
+        lastMotionCenters.clear()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()
@@ -722,6 +739,7 @@ class IntervalCaptureService : LifecycleService() {
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val SWITCH_SETTLE_MS = 800L
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        private val FRAME_CENTER = MotionCenter(0.5, 0.5)
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
         private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
     }
