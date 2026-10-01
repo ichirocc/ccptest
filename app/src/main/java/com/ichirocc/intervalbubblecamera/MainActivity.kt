@@ -41,9 +41,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lastPhoto: TextView
     private lateinit var intervalValue: TextView
     private lateinit var intervalSeekBar: SeekBar
-    private lateinit var lensGroup: RadioGroup
-    private lateinit var backCamera: RadioButton
-    private lateinit var frontCamera: RadioButton
     private lateinit var motionSensitivityGroup: RadioGroup
     private lateinit var motionSensitivityButtons: Map<MotionSensitivity, RadioButton>
     private lateinit var iconColorPreview: ImageView
@@ -118,9 +115,6 @@ class MainActivity : AppCompatActivity() {
         lastPhoto = findViewById(R.id.lastPhoto)
         intervalValue = findViewById(R.id.intervalValue)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
-        lensGroup = findViewById(R.id.lensGroup)
-        backCamera = findViewById(R.id.backCamera)
-        frontCamera = findViewById(R.id.frontCamera)
         motionSensitivityGroup = findViewById(R.id.motionSensitivityGroup)
         motionSensitivityButtons = linkedMapOf(
             MotionSensitivity.LOW to findViewById(R.id.motionSensitivityLow),
@@ -156,11 +150,6 @@ class MainActivity : AppCompatActivity() {
             IntervalPolicy.clampSeconds(savedInterval),
         )
 
-        when (preferences.getString(KEY_LENS_FACING, IntervalCaptureService.LENS_BACK)) {
-            IntervalCaptureService.LENS_FRONT -> frontCamera.isChecked = true
-            else -> backCamera.isChecked = true
-        }
-
         val savedSensitivity = MotionSensitivity.fromStorageKey(
             preferences.getString(KEY_MOTION_SENSITIVITY, MotionSensitivity.DEFAULT.storageKey),
         )
@@ -186,15 +175,6 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
-
-        lensGroup.setOnCheckedChangeListener { _, checkedId ->
-            val lens = if (checkedId == R.id.frontCamera) {
-                IntervalCaptureService.LENS_FRONT
-            } else {
-                IntervalCaptureService.LENS_BACK
-            }
-            preferences.edit { putString(KEY_LENS_FACING, lens) }
-        }
 
         motionSensitivityGroup.setOnCheckedChangeListener { _, _ ->
             preferences.edit { putString(KEY_MOTION_SENSITIVITY, selectedMotionSensitivity().storageKey) }
@@ -257,8 +237,6 @@ class MainActivity : AppCompatActivity() {
 
         val controlsEnabled = !state.isActive
         intervalSeekBar.isEnabled = controlsEnabled
-        backCamera.isEnabled = controlsEnabled
-        frontCamera.isEnabled = controlsEnabled
         motionSensitivityButtons.values.forEach { it.isEnabled = controlsEnabled }
 
         startStopButton.isEnabled = state.phase != CapturePhase.STARTING
@@ -312,15 +290,9 @@ class MainActivity : AppCompatActivity() {
     private fun startCapture() {
         pendingStart = false
         val intervalSeconds = IntervalPolicy.secondsFromSeekProgress(intervalSeekBar.progress)
-        val lensFacing = if (frontCamera.isChecked) {
-            IntervalCaptureService.LENS_FRONT
-        } else {
-            IntervalCaptureService.LENS_BACK
-        }
         val motionSensitivity = selectedMotionSensitivity()
         preferences.edit {
             putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
-            putString(KEY_LENS_FACING, lensFacing)
             putString(KEY_MOTION_SENSITIVITY, motionSensitivity.storageKey)
             putString(KEY_ICON_COLOR, selectedIconColor.storageKey)
         }
@@ -328,7 +300,6 @@ class MainActivity : AppCompatActivity() {
         val serviceIntent = Intent(this, IntervalCaptureService::class.java).apply {
             action = IntervalCaptureService.ACTION_START
             putExtra(IntervalCaptureService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
-            putExtra(IntervalCaptureService.EXTRA_LENS_FACING, lensFacing)
             putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
             putExtra(IntervalCaptureService.EXTRA_MOTION_SENSITIVITY, motionSensitivity.storageKey)
         }
@@ -483,7 +454,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREFERENCES_NAME = "capture_preferences"
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
-        private const val KEY_LENS_FACING = "lens_facing"
         private const val KEY_ICON_COLOR = "icon_color"
         private const val KEY_MOTION_SENSITIVITY = "motion_sensitivity"
     }

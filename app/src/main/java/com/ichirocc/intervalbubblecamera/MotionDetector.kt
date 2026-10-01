@@ -68,3 +68,34 @@ object MotionDetector {
         return (77 * r + 150 * g + 29 * b) shr 8
     }
 }
+
+sealed interface CameraSetDecision {
+    /** 比較できる前回の画像がまだ無い。 */
+    data object Baseline : CameraSetDecision
+    data class NoMotion(val maxChangedRatio: Double) : CameraSetDecision
+    data class Motion(val detectedBy: Set<String>) : CameraSetDecision
+}
+
+object CameraSetMotion {
+    /**
+     * カメラごとに前回の画像と比べ、どれか 1 台でも動体を検知したら Motion を返す。
+     * 前回の画像が無いカメラは判定に使わない（全台とも無ければ Baseline）。
+     */
+    fun decide(
+        previous: Map<String, LumaFrame>,
+        current: Map<String, LumaFrame>,
+        sensitivity: MotionSensitivity,
+    ): CameraSetDecision {
+        val results = current.mapNotNull { (camera, frame) ->
+            previous[camera]?.let { camera to MotionDetector.compare(it, frame, sensitivity) }
+        }
+        if (results.isEmpty()) return CameraSetDecision.Baseline
+
+        val detectedBy = results.filter { it.second.motionDetected }.map { it.first }.toSet()
+        return if (detectedBy.isEmpty()) {
+            CameraSetDecision.NoMotion(results.maxOf { it.second.changedRatio })
+        } else {
+            CameraSetDecision.Motion(detectedBy)
+        }
+    }
+}

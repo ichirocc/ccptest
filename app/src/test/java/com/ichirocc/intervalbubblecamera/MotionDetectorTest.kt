@@ -69,3 +69,54 @@ class MotionDetectorTest {
         assertTrue(MotionDetector.lumaOf(0xFF00FF00.toInt()) > MotionDetector.lumaOf(0xFFFF0000.toInt()))
     }
 }
+
+class CameraSetMotionTest {
+    private val width = MotionDetector.GRID_WIDTH
+    private val height = MotionDetector.GRID_HEIGHT
+
+    private fun frame(fill: (x: Int, y: Int) -> Int): LumaFrame =
+        LumaFrame(width, height, IntArray(width * height) { fill(it % width, it / width) })
+
+    private val still = frame { x, y -> (x + y) % 150 + 40 }
+    private val moved = frame { x, y -> if (x in 20 until 40 && y in 10 until 30) 250 else (x + y) % 150 + 40 }
+
+    @Test
+    fun `first cycle is a baseline`() {
+        val decision = CameraSetMotion.decide(
+            previous = emptyMap(),
+            current = mapOf("back" to still, "front" to still),
+            sensitivity = MotionSensitivity.MEDIUM,
+        )
+        assertEquals(CameraSetDecision.Baseline, decision)
+    }
+
+    @Test
+    fun `motion on either camera triggers the set`() {
+        val decision = CameraSetMotion.decide(
+            previous = mapOf("back" to still, "front" to still),
+            current = mapOf("back" to still, "front" to moved),
+            sensitivity = MotionSensitivity.MEDIUM,
+        )
+        assertEquals(CameraSetDecision.Motion(setOf("front")), decision)
+    }
+
+    @Test
+    fun `no motion on any camera skips the set`() {
+        val decision = CameraSetMotion.decide(
+            previous = mapOf("back" to still, "front" to still),
+            current = mapOf("back" to still, "front" to still),
+            sensitivity = MotionSensitivity.HIGH,
+        )
+        assertTrue(decision is CameraSetDecision.NoMotion)
+    }
+
+    @Test
+    fun `a camera without a previous frame is not judged`() {
+        val decision = CameraSetMotion.decide(
+            previous = mapOf("back" to still),
+            current = mapOf("back" to still, "front" to moved),
+            sensitivity = MotionSensitivity.MEDIUM,
+        )
+        assertTrue(decision is CameraSetDecision.NoMotion)
+    }
+}
