@@ -15,6 +15,11 @@ android {
         versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 対象端末（Android 16 の実機、OPPO A5 5G など）は 64 ビット ARM のみ。MediaPipe の実行部品を他の CPU 向けに入れない。
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
