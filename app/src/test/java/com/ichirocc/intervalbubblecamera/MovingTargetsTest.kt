@@ -1,7 +1,6 @@
 package com.ichirocc.intervalbubblecamera
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Test
 
 class MovingTargetsTest {
@@ -20,21 +19,16 @@ class MovingTargetsTest {
     private val parkedCarBox = NormalizedBox(0.60, 0.50, 0.95, 0.90)
 
     @Test
-    fun `a detected person overlapping the change is the moving target`() {
+    fun `most of the change falls inside the moving person`() {
         val mask = MovingTargets.changedMask(still, personMoved, MotionThreshold.DEFAULT)
-        assertEquals(personBox, MovingTargets.pick(mask, width, height, listOf(personBox, parkedCarBox)))
+        assertEquals(1.0, MovingTargets.shareOfChangeInside(mask, width, height, personBox), 1e-9)
+        assertEquals(0.0, MovingTargets.shareOfChangeInside(mask, width, height, parkedCarBox), 1e-9)
     }
 
     @Test
-    fun `a detected object away from the change is not moving`() {
-        val mask = MovingTargets.changedMask(still, personMoved, MotionThreshold.DEFAULT)
-        assertNull(MovingTargets.pick(mask, width, height, listOf(parkedCarBox)))
-    }
-
-    @Test
-    fun `nothing moves without a change`() {
+    fun `nothing is inside when nothing changed`() {
         val mask = MovingTargets.changedMask(still, still, MotionThreshold.DEFAULT)
-        assertNull(MovingTargets.pick(mask, width, height, listOf(personBox)))
+        assertEquals(0.0, MovingTargets.shareOfChangeInside(mask, width, height, personBox), 1e-9)
     }
 
     @Test

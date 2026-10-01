@@ -49,6 +49,7 @@ import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionThreshold
 import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.R
+import com.ichirocc.intervalbubblecamera.TargetTracker
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -86,6 +87,7 @@ class IntervalCaptureService : LifecycleService() {
     private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
+    private val targetTrackers = mutableMapOf<String, TargetTracker>()
     private var targetDetector: TargetDetector? = null
     private var targetDetectorTried = false
     private var wakeLock: PowerManager.WakeLock? = null
@@ -155,6 +157,7 @@ class IntervalCaptureService : LifecycleService() {
         motionThreshold = threshold
         motionReferences.clear()
         lastMotionCenters.clear()
+        targetTrackers.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
 
@@ -371,7 +374,7 @@ class IntervalCaptureService : LifecycleService() {
                 return@forEachCameraGroup
             }
             var captured = shot as InMemoryResult.Captured
-            val judgement = motionReferences[key]?.let { judgeMotion(it, captured) }
+            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured) }
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
@@ -397,29 +400,38 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     /**
-     * 画像の変化で動きを拾い、変化があれば端末内の物体検出で人・車などが動いたかを確かめる。
-     * 動いた人・車があればその中心をピントの位置にする。物体検出を使えない端末では変化だけで判定する。
+     * 画像の変化で動きを拾い、端末内の検出で人（全身・体の一部・手だけ）や車などを確かめて追跡する。
+     * 動いた対象があればその中心をピントの位置にする。検出を使えない端末では変化だけで判定する。
      */
-    private suspend fun judgeMotion(reference: LumaFrame, shot: InMemoryResult.Captured): MotionResult {
+    private suspend fun judgeMotion(
+        key: String,
+        reference: LumaFrame,
+        shot: InMemoryResult.Captured,
+    ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
-        if (!pixelMotion.motionDetected) return pixelMotion
+        val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
+        // 追跡中の対象がいれば変化が閾値未満でも検出し、ゆっくりした動きも追う。
+        if (!pixelMotion.motionDetected && !tracker.hasTracks) return pixelMotion
 
         return withContext(Dispatchers.Default) {
             val detector = loadTargetDetector() ?: return@withContext pixelMotion
             runCatching {
-                val boxes = detector.detect(shot.jpeg, shot.rotationDegrees)
+                val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
                 val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
-                MovingTargets.pick(mask, shot.frame.width, shot.frame.height, boxes)
+                val tracked = tracker.update(detections) { box ->
+                    MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                }
+                TargetTracker.focusTarget(tracked)
             }.fold(
                 onSuccess = { target ->
                     if (target == null) {
                         pixelMotion.copy(motionDetected = false, center = null)
                     } else {
-                        pixelMotion.copy(center = target.center)
+                        pixelMotion.copy(motionDetected = true, center = target.box.center)
                     }
                 },
                 onFailure = { error ->
-                    Log.w(TAG, "Object detection failed; using pixel change only", error)
+                    Log.w(TAG, "Target detection failed; using pixel change only", error)
                     pixelMotion
                 },
             )
@@ -654,6 +666,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        targetTrackers.clear()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()
@@ -671,6 +684,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        targetTrackers.clear()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()

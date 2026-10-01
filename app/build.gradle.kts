@@ -34,7 +34,7 @@ android {
     }
 
     androidResources {
-        noCompress += "tflite"
+        noCompress += listOf("tflite", "task")
     }
 
     testOptions {

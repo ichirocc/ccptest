@@ -164,13 +164,11 @@ object MovingTargets {
         }
     }
 
-    /** 検出した人・車などの枠のうち、動いているもので一番大きいものを返す。無ければ null。 */
-    fun pick(mask: BooleanArray, width: Int, height: Int, boxes: List<NormalizedBox>): NormalizedBox? {
+    /** 変化した画素のうち、枠の中に入っている割合（変化が無ければ 0）。 */
+    fun shareOfChangeInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Double {
         val totalChanged = mask.count { it }
-        if (totalChanged == 0) return null
-        return boxes
-            .filter { changedInside(mask, width, height, it) >= totalChanged * MIN_SHARE_OF_CHANGE }
-            .maxByOrNull { it.area }
+        if (totalChanged == 0) return 0.0
+        return changedInside(mask, width, height, box).toDouble() / totalChanged
     }
 
     private fun changedInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Int {
