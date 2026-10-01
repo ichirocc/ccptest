@@ -34,11 +34,6 @@ import com.ichirocc.intervalbubblecamera.capture.IntervalCaptureService
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var statusDot: android.view.View
-    private lateinit var statusTitle: TextView
-    private lateinit var statusDetail: TextView
-    private lateinit var photoCount: TextView
-    private lateinit var lastPhoto: TextView
     private lateinit var intervalValue: TextView
     private lateinit var intervalSeekBar: SeekBar
     private lateinit var motionSensitivityGroup: RadioGroup
@@ -56,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedIconColor = AppIconColor.DEFAULT
     private var pendingStart = false
     private var minimizeWhenRunning = false
+    private var shownErrorDetail: String? = null
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -108,11 +104,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindViews() {
-        statusDot = findViewById(R.id.statusDot)
-        statusTitle = findViewById(R.id.statusTitle)
-        statusDetail = findViewById(R.id.statusDetail)
-        photoCount = findViewById(R.id.photoCount)
-        lastPhoto = findViewById(R.id.lastPhoto)
         intervalValue = findViewById(R.id.intervalValue)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
         motionSensitivityGroup = findViewById(R.id.motionSensitivityGroup)
@@ -212,28 +203,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderState(state: CaptureUiState) {
-        statusTitle.text = when (state.phase) {
-            CapturePhase.IDLE -> getString(R.string.status_idle)
-            CapturePhase.STARTING -> getString(R.string.status_starting)
-            CapturePhase.RUNNING -> getString(R.string.status_running)
-            CapturePhase.ERROR -> getString(R.string.status_error)
-        }
-        statusDot.setBackgroundResource(
-            when (state.phase) {
-                CapturePhase.RUNNING -> R.drawable.bg_status_running
-                CapturePhase.ERROR -> R.drawable.bg_status_error
-                else -> R.drawable.bg_status_idle
-            },
-        )
-        statusDetail.text = state.detail
-        photoCount.text = if (state.isActive) {
-            getString(R.string.photo_count_with_skipped, state.photoCount, state.skippedCount)
+        // 状態表示は持たないため、エラーだけは原因が分かるよう一度だけ知らせる。
+        if (state.phase == CapturePhase.ERROR) {
+            if (state.detail != shownErrorDetail) showMessage(state.detail)
+            shownErrorDetail = state.detail
         } else {
-            getString(R.string.photo_count, state.photoCount)
+            shownErrorDetail = null
         }
-        lastPhoto.text = state.lastPhotoName?.let {
-            getString(R.string.last_photo_name, it)
-        } ?: getString(R.string.last_photo_none)
 
         val controlsEnabled = !state.isActive
         intervalSeekBar.isEnabled = controlsEnabled
