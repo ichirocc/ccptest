@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.hardware.camera2.CameraCharacteristics
+import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
 import android.os.SystemClock
@@ -43,6 +44,7 @@ import com.ichirocc.intervalbubblecamera.CameraCandidate
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
+import com.ichirocc.intervalbubblecamera.DeviceProfile
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
@@ -75,6 +77,11 @@ import kotlin.coroutines.resume
 
 class IntervalCaptureService : LifecycleService() {
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
+    private val powerManager by lazy { getSystemService(PowerManager::class.java) }
+    private val deviceProfile by lazy {
+        DeviceProfile.detect(Build.MODEL, Build.VERSION.MEDIA_PERFORMANCE_CLASS)
+            .also { Log.i(TAG, "Device ${Build.MODEL} -> ${it.label} profile") }
+    }
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val detectionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val detectionDispatcher = detectionExecutor.asCoroutineDispatcher()
@@ -341,7 +348,7 @@ class IntervalCaptureService : LifecycleService() {
 
     private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        .setJpegQuality(90)
+        .setJpegQuality(deviceProfile.jpegQuality)
         .setTargetRotation(targetRotation)
         .build()
 
@@ -444,6 +451,11 @@ class IntervalCaptureService : LifecycleService() {
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         // 追跡中の対象がいれば変化が閾値未満でも検出し、ゆっくりした動きも追う。
         if (!pixelMotion.motionDetected && !tracker.hasTracks) return pixelMotion
+        // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
+        if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
+            Log.w(TAG, "Thermal status ${powerManager.currentThermalStatus}; skipping detection")
+            return pixelMotion
+        }
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
         return withContext(detectionDispatcher) {
@@ -474,7 +486,7 @@ class IntervalCaptureService : LifecycleService() {
     private fun loadTargetDetector(): TargetDetector? {
         if (!targetDetectorTried) {
             targetDetectorTried = true
-            targetDetector = TargetDetector.createOrNull(this)
+            targetDetector = TargetDetector.createOrNull(this, deviceProfile)
         }
         return targetDetector
     }
@@ -501,7 +513,7 @@ class IntervalCaptureService : LifecycleService() {
                     continue
                 }
                 // 切り替え直後は露出が合っておらず、暗い画像を動体と誤判定するため待つ。
-                delay(SWITCH_SETTLE_MS)
+                delay(deviceProfile.switchSettleMs)
             }
             val captures = boundCaptures
             val taken = coroutineScope {
@@ -829,7 +841,6 @@ class IntervalCaptureService : LifecycleService() {
         private const val NOTIFICATION_ID = 1042
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
-        private const val SWITCH_SETTLE_MS = 800L
         private const val FOCUS_TIMEOUT_MS = 2_000L
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L

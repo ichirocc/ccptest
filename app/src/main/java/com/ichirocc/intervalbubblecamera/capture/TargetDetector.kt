@@ -15,6 +15,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
 import com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker
 import com.ichirocc.intervalbubblecamera.DetectedTarget
+import com.ichirocc.intervalbubblecamera.DeviceProfile
 import com.ichirocc.intervalbubblecamera.NormalizedBox
 import com.ichirocc.intervalbubblecamera.TargetKind
 import com.ichirocc.intervalbubblecamera.TargetTracker
@@ -24,14 +25,15 @@ import com.ichirocc.intervalbubblecamera.TargetTracker
  * - 物体検出（EfficientDet-Lite0）: 全身・大部分が写った人と車など
  * - 姿勢推定（Pose Landmarker lite）: 見えている関節だけで体の一部（脚・足首・つま先を含む）
  * - 手の検出（Hand Landmarker）: 手だけが写っている場合
- * 対象機種（Pixel 10 Pro XL・OPPO A5 5G）の GPU で動かし、GPU で作れなかった検出器は CPU で作る。
- * それでも作れなかった検出器は使わず、残りで検出する。
+ * モデルと実行先（NPU・GPU・CPU）は機種ごとの [DeviceProfile] に従い、作れた実行先を使う。
+ * どこでも作れなかった検出器は使わず、残りで検出する。
  * GPU の検出器は作ったスレッドで使う必要があるため、作成と [detect] は同じ 1 本のスレッドから呼ぶこと。
  */
 class TargetDetector private constructor(
     private val objectDetector: ObjectDetector?,
     private val poseLandmarker: PoseLandmarker?,
     private val handLandmarker: HandLandmarker?,
+    private val detectSize: Int,
 ) : AutoCloseable {
 
     /** 撮影した JPEG から対象を検出し、回す前の撮影画像（センサーの向き）の座標で返す。 */
@@ -107,7 +109,7 @@ class TargetDetector private constructor(
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
         var sampleSize = 1
-        while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= DETECT_SIZE) sampleSize *= 2
+        while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= detectSize) sampleSize *= 2
         val decoded = BitmapFactory.decodeByteArray(
             jpeg,
             0,
@@ -131,18 +133,18 @@ class TargetDetector private constructor(
 
     companion object {
         private const val TAG = "TargetDetector"
-        private const val DETECT_SIZE = 640
         private const val PERSON_LABEL = "person"
         private const val MIN_LANDMARK_VISIBILITY = 0.5f
         private val TARGET_LABELS = listOf(PERSON_LABEL, "bicycle", "car", "motorcycle", "bus", "truck")
 
         /** 1 つも作れなければ null（その場合は画像の変化だけで判定する）。 */
-        fun createOrNull(context: Context): TargetDetector? {
-            val objectDetector = create("object detector") { delegate ->
+        fun createOrNull(context: Context, profile: DeviceProfile): TargetDetector? {
+            val delegates = profile.delegates.mapNotNull { name -> Delegate.entries.firstOrNull { it.name == name } }
+            val objectDetector = create("object detector", delegates) { delegate ->
                 ObjectDetector.createFromOptions(
                     context,
                     ObjectDetector.ObjectDetectorOptions.builder()
-                        .setBaseOptions(baseOptions("efficientdet_lite0.tflite", delegate))
+                        .setBaseOptions(baseOptions(profile.objectModel, delegate))
                         .setRunningMode(RunningMode.IMAGE)
                         .setScoreThreshold(0.4f)
                         .setMaxResults(10)
@@ -150,18 +152,18 @@ class TargetDetector private constructor(
                         .build(),
                 )
             }
-            val poseLandmarker = create("pose landmarker") { delegate ->
+            val poseLandmarker = create("pose landmarker", delegates) { delegate ->
                 PoseLandmarker.createFromOptions(
                     context,
                     PoseLandmarker.PoseLandmarkerOptions.builder()
-                        .setBaseOptions(baseOptions("pose_landmarker_lite.task", delegate))
+                        .setBaseOptions(baseOptions(profile.poseModel, delegate))
                         .setRunningMode(RunningMode.IMAGE)
-                        .setNumPoses(3)
+                        .setNumPoses(profile.maxPoses)
                         .setMinPoseDetectionConfidence(0.5f)
                         .build(),
                 )
             }
-            val handLandmarker = create("hand landmarker") { delegate ->
+            val handLandmarker = create("hand landmarker", delegates) { delegate ->
                 HandLandmarker.createFromOptions(
                     context,
                     HandLandmarker.HandLandmarkerOptions.builder()
@@ -173,14 +175,14 @@ class TargetDetector private constructor(
                 )
             }
             if (objectDetector == null && poseLandmarker == null && handLandmarker == null) return null
-            return TargetDetector(objectDetector, poseLandmarker, handLandmarker)
+            return TargetDetector(objectDetector, poseLandmarker, handLandmarker, profile.detectSize)
         }
 
         private fun baseOptions(modelAsset: String, delegate: Delegate): BaseOptions =
             BaseOptions.builder().setModelAssetPath(modelAsset).setDelegate(delegate).build()
 
-        private fun <T> create(name: String, build: (Delegate) -> T): T? {
-            for (delegate in listOf(Delegate.GPU, Delegate.CPU)) {
+        private fun <T> create(name: String, delegates: List<Delegate>, build: (Delegate) -> T): T? {
+            for (delegate in delegates) {
                 runCatching { build(delegate) }
                     .onSuccess {
                         Log.i(TAG, "Created $name on $delegate")
