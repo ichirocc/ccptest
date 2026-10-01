@@ -11,8 +11,6 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.ImageButton
 import android.widget.ImageView
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -34,16 +32,12 @@ import com.ichirocc.intervalbubblecamera.capture.IntervalCaptureService
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
-    private lateinit var statusDot: android.view.View
-    private lateinit var statusTitle: TextView
-    private lateinit var statusDetail: TextView
-    private lateinit var photoCount: TextView
-    private lateinit var lastPhoto: TextView
     private lateinit var intervalValue: TextView
     private lateinit var intervalSeekBar: SeekBar
-    private lateinit var lensGroup: RadioGroup
-    private lateinit var backCamera: RadioButton
-    private lateinit var frontCamera: RadioButton
+    private lateinit var motionPixelValue: TextView
+    private lateinit var motionPixelSeekBar: SeekBar
+    private lateinit var motionAreaValue: TextView
+    private lateinit var motionAreaSeekBar: SeekBar
     private lateinit var iconColorPreview: ImageView
     private lateinit var iconColorSelectedLabel: TextView
     private lateinit var iconColorButtons: Map<AppIconColor, ImageButton>
@@ -57,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private var selectedIconColor = AppIconColor.DEFAULT
     private var pendingStart = false
     private var minimizeWhenRunning = false
+    private var shownErrorDetail: String? = null
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -109,16 +104,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindViews() {
-        statusDot = findViewById(R.id.statusDot)
-        statusTitle = findViewById(R.id.statusTitle)
-        statusDetail = findViewById(R.id.statusDetail)
-        photoCount = findViewById(R.id.photoCount)
-        lastPhoto = findViewById(R.id.lastPhoto)
         intervalValue = findViewById(R.id.intervalValue)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
-        lensGroup = findViewById(R.id.lensGroup)
-        backCamera = findViewById(R.id.backCamera)
-        frontCamera = findViewById(R.id.frontCamera)
+        motionPixelValue = findViewById(R.id.motionPixelValue)
+        motionPixelSeekBar = findViewById(R.id.motionPixelSeekBar)
+        motionAreaValue = findViewById(R.id.motionAreaValue)
+        motionAreaSeekBar = findViewById(R.id.motionAreaSeekBar)
         iconColorPreview = findViewById(R.id.iconColorPreview)
         iconColorSelectedLabel = findViewById(R.id.iconColorSelectedLabel)
         iconColorButtons = linkedMapOf(
@@ -148,10 +139,13 @@ class MainActivity : AppCompatActivity() {
             IntervalPolicy.clampSeconds(savedInterval),
         )
 
-        when (preferences.getString(KEY_LENS_FACING, IntervalCaptureService.LENS_BACK)) {
-            IntervalCaptureService.LENS_FRONT -> frontCamera.isChecked = true
-            else -> backCamera.isChecked = true
-        }
+        val savedThreshold = MotionThreshold.clamped(
+            preferences.getInt(KEY_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
+            preferences.getInt(KEY_MOTION_AREA_PERMILLE, MotionThreshold.DEFAULT.areaPermille),
+        )
+        motionPixelSeekBar.progress = MotionThreshold.progressFromPixel(savedThreshold.pixelThreshold)
+        motionAreaSeekBar.progress = MotionThreshold.progressFromArea(savedThreshold.areaPermille)
+        renderMotionThreshold()
 
         selectedIconColor = AppIconColor.fromStorageKey(
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
@@ -174,14 +168,17 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
 
-        lensGroup.setOnCheckedChangeListener { _, checkedId ->
-            val lens = if (checkedId == R.id.frontCamera) {
-                IntervalCaptureService.LENS_FRONT
-            } else {
-                IntervalCaptureService.LENS_BACK
+        val thresholdListener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                renderMotionThreshold()
+                if (fromUser) saveMotionThreshold(selectedMotionThreshold())
             }
-            preferences.edit { putString(KEY_LENS_FACING, lens) }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         }
+        motionPixelSeekBar.setOnSeekBarChangeListener(thresholdListener)
+        motionAreaSeekBar.setOnSeekBarChangeListener(thresholdListener)
 
         iconColorButtons.forEach { (color, button) ->
             button.setOnClickListener { selectIconColor(color) }
@@ -215,29 +212,18 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun renderState(state: CaptureUiState) {
-        statusTitle.text = when (state.phase) {
-            CapturePhase.IDLE -> getString(R.string.status_idle)
-            CapturePhase.STARTING -> getString(R.string.status_starting)
-            CapturePhase.RUNNING -> getString(R.string.status_running)
-            CapturePhase.ERROR -> getString(R.string.status_error)
+        // 状態表示は持たないため、エラーだけは原因が分かるよう一度だけ知らせる。
+        if (state.phase == CapturePhase.ERROR) {
+            if (state.detail != shownErrorDetail) showMessage(state.detail)
+            shownErrorDetail = state.detail
+        } else {
+            shownErrorDetail = null
         }
-        statusDot.setBackgroundResource(
-            when (state.phase) {
-                CapturePhase.RUNNING -> R.drawable.bg_status_running
-                CapturePhase.ERROR -> R.drawable.bg_status_error
-                else -> R.drawable.bg_status_idle
-            },
-        )
-        statusDetail.text = state.detail
-        photoCount.text = getString(R.string.photo_count, state.photoCount)
-        lastPhoto.text = state.lastPhotoName?.let {
-            getString(R.string.last_photo_name, it)
-        } ?: getString(R.string.last_photo_none)
 
         val controlsEnabled = !state.isActive
         intervalSeekBar.isEnabled = controlsEnabled
-        backCamera.isEnabled = controlsEnabled
-        frontCamera.isEnabled = controlsEnabled
+        motionPixelSeekBar.isEnabled = controlsEnabled
+        motionAreaSeekBar.isEnabled = controlsEnabled
 
         startStopButton.isEnabled = state.phase != CapturePhase.STARTING
         if (state.isActive) {
@@ -257,6 +243,24 @@ class MainActivity : AppCompatActivity() {
         if (state.phase == CapturePhase.RUNNING && minimizeWhenRunning) {
             minimizeWhenRunning = false
             window.decorView.post { moveTaskToBack(true) }
+        }
+    }
+
+    private fun selectedMotionThreshold(): MotionThreshold = MotionThreshold(
+        MotionThreshold.pixelFromProgress(motionPixelSeekBar.progress),
+        MotionThreshold.areaFromProgress(motionAreaSeekBar.progress),
+    )
+
+    private fun renderMotionThreshold() {
+        val threshold = selectedMotionThreshold()
+        motionPixelValue.text = threshold.pixelThreshold.toString()
+        motionAreaValue.text = MotionThreshold.formatAreaPercent(threshold.areaPermille)
+    }
+
+    private fun saveMotionThreshold(threshold: MotionThreshold) {
+        preferences.edit {
+            putInt(KEY_MOTION_PIXEL_THRESHOLD, threshold.pixelThreshold)
+            putInt(KEY_MOTION_AREA_PERMILLE, threshold.areaPermille)
         }
     }
 
@@ -284,22 +288,19 @@ class MainActivity : AppCompatActivity() {
     private fun startCapture() {
         pendingStart = false
         val intervalSeconds = IntervalPolicy.secondsFromSeekProgress(intervalSeekBar.progress)
-        val lensFacing = if (frontCamera.isChecked) {
-            IntervalCaptureService.LENS_FRONT
-        } else {
-            IntervalCaptureService.LENS_BACK
-        }
+        val motionThreshold = selectedMotionThreshold()
+        saveMotionThreshold(motionThreshold)
         preferences.edit {
             putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
-            putString(KEY_LENS_FACING, lensFacing)
             putString(KEY_ICON_COLOR, selectedIconColor.storageKey)
         }
 
         val serviceIntent = Intent(this, IntervalCaptureService::class.java).apply {
             action = IntervalCaptureService.ACTION_START
             putExtra(IntervalCaptureService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
-            putExtra(IntervalCaptureService.EXTRA_LENS_FACING, lensFacing)
             putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_PIXEL_THRESHOLD, motionThreshold.pixelThreshold)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_AREA_PERMILLE, motionThreshold.areaPermille)
         }
 
         runCatching {
@@ -452,7 +453,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val PREFERENCES_NAME = "capture_preferences"
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
-        private const val KEY_LENS_FACING = "lens_facing"
         private const val KEY_ICON_COLOR = "icon_color"
+        private const val KEY_MOTION_PIXEL_THRESHOLD = "motion_pixel_threshold"
+        private const val KEY_MOTION_AREA_PERMILLE = "motion_area_permille"
     }
 }

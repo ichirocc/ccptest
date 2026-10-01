@@ -11,10 +11,15 @@ android {
         applicationId = "com.ichirocc.intervalbubblecamera"
         minSdk = 36
         targetSdk = 36
-        versionCode = 8
-        versionName = "1.4.0"
+        versionCode = 9
+        versionName = "1.5.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        // 対象端末（Android 16 の実機。OPPO A5 5G・Pixel 10 Pro XL）は 64 ビット ARM のみ。MediaPipe の実行部品を他の CPU 向けに入れない。
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildTypes {
@@ -33,6 +38,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        noCompress += listOf("tflite", "task")
+    }
+
     testOptions {
         unitTests.isIncludeAndroidResources = false
     }
@@ -46,6 +55,7 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("androidx.exifinterface:exifinterface:1.4.2")
     implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.google.android.material:material:1.13.0")
@@ -59,6 +69,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
     testImplementation("junit:junit:4.13.2")
 }
