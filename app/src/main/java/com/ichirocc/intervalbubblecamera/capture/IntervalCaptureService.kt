@@ -47,6 +47,7 @@ import com.ichirocc.intervalbubblecamera.MotionCenter
 import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionThreshold
+import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Dispatchers
@@ -85,6 +86,8 @@ class IntervalCaptureService : LifecycleService() {
     private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
+    private var targetDetector: TargetDetector? = null
+    private var targetDetectorTried = false
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var orientationListener: OrientationEventListener
 
@@ -368,9 +371,7 @@ class IntervalCaptureService : LifecycleService() {
                 return@forEachCameraGroup
             }
             var captured = shot as InMemoryResult.Captured
-            val judgement = motionReferences[key]?.let {
-                MotionDetector.compare(it, captured.frame, motionThreshold)
-            }
+            val judgement = motionReferences[key]?.let { judgeMotion(it, captured) }
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
@@ -393,6 +394,44 @@ class IntervalCaptureService : LifecycleService() {
                     }
             }
         }
+    }
+
+    /**
+     * 画像の変化で動きを拾い、変化があれば端末内の物体検出で人・車などが動いたかを確かめる。
+     * 動いた人・車があればその中心をピントの位置にする。物体検出を使えない端末では変化だけで判定する。
+     */
+    private suspend fun judgeMotion(reference: LumaFrame, shot: InMemoryResult.Captured): MotionResult {
+        val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
+        if (!pixelMotion.motionDetected) return pixelMotion
+
+        return withContext(Dispatchers.Default) {
+            val detector = loadTargetDetector() ?: return@withContext pixelMotion
+            runCatching {
+                val boxes = detector.detect(shot.jpeg, shot.rotationDegrees)
+                val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                MovingTargets.pick(mask, shot.frame.width, shot.frame.height, boxes)
+            }.fold(
+                onSuccess = { target ->
+                    if (target == null) {
+                        pixelMotion.copy(motionDetected = false, center = null)
+                    } else {
+                        pixelMotion.copy(center = target.center)
+                    }
+                },
+                onFailure = { error ->
+                    Log.w(TAG, "Object detection failed; using pixel change only", error)
+                    pixelMotion
+                },
+            )
+        }
+    }
+
+    private fun loadTargetDetector(): TargetDetector? {
+        if (!targetDetectorTried) {
+            targetDetectorTried = true
+            targetDetector = TargetDetector.createOrNull(this)
+        }
+        return targetDetector
     }
 
     /** 全カメラを組ごとに撮り、撮れた順に [onShot] へ渡す（呼び出し中はその組がつながっている）。 */
@@ -697,6 +736,8 @@ class IntervalCaptureService : LifecycleService() {
         releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
+        targetDetector?.close()
+        targetDetector = null
         if (CaptureStateStore.state.value.isActive) {
             CaptureStateStore.markStopped("撮影サービスが終了しました。")
         }

@@ -33,6 +33,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        noCompress += "tflite"
+    }
+
     testOptions {
         unitTests.isIncludeAndroidResources = false
     }
@@ -60,6 +64,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.google.mediapipe:tasks-vision:0.10.35")
 
     testImplementation("junit:junit:4.13.2")
 }

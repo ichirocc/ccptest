@@ -130,3 +130,56 @@ object CameraSetMotion {
         }
     }
 }
+
+/** 画像に対する正規化座標の矩形（左上 (0, 0)・右下 (1, 1)）。 */
+data class NormalizedBox(val left: Double, val top: Double, val right: Double, val bottom: Double) {
+    val area: Double get() = (right - left).coerceAtLeast(0.0) * (bottom - top).coerceAtLeast(0.0)
+    val center: MotionCenter get() = MotionCenter((left + right) / 2, (top + bottom) / 2)
+
+    /**
+     * 正立画像（撮影画像を時計回りに [rotationDegrees] 回したもの）上の矩形を、
+     * 回す前の撮影画像（センサーの向き）上の矩形に戻す。
+     */
+    fun unrotate(rotationDegrees: Int): NormalizedBox = when (((rotationDegrees % 360) + 360) % 360) {
+        90 -> NormalizedBox(top, 1 - right, bottom, 1 - left)
+        180 -> NormalizedBox(1 - right, 1 - bottom, 1 - left, 1 - top)
+        270 -> NormalizedBox(1 - bottom, left, 1 - top, right)
+        else -> this
+    }
+}
+
+object MovingTargets {
+    /** 変化した画素のうち、この割合以上が枠の中にあれば「動いている」とみなす。 */
+    const val MIN_SHARE_OF_CHANGE = 0.1
+
+    /** 前後の画像で変化した画素（[MotionDetector.compare] と同じ基準）を true にした配列。 */
+    fun changedMask(previous: LumaFrame, current: LumaFrame, threshold: MotionThreshold): BooleanArray {
+        require(previous.width == current.width && previous.height == current.height) {
+            "frames must have the same size"
+        }
+        val count = current.pixels.size
+        val shift = ((current.pixels.sum() - previous.pixels.sum()).toDouble() / count).roundToInt()
+        return BooleanArray(count) {
+            abs(current.pixels[it] - previous.pixels[it] - shift) > threshold.pixelThreshold
+        }
+    }
+
+    /** 検出した人・車などの枠のうち、動いているもので一番大きいものを返す。無ければ null。 */
+    fun pick(mask: BooleanArray, width: Int, height: Int, boxes: List<NormalizedBox>): NormalizedBox? {
+        val totalChanged = mask.count { it }
+        if (totalChanged == 0) return null
+        return boxes
+            .filter { changedInside(mask, width, height, it) >= totalChanged * MIN_SHARE_OF_CHANGE }
+            .maxByOrNull { it.area }
+    }
+
+    private fun changedInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Int {
+        val x0 = (box.left * width).toInt().coerceIn(0, width)
+        val x1 = Math.ceil(box.right * width).toInt().coerceIn(0, width)
+        val y0 = (box.top * height).toInt().coerceIn(0, height)
+        val y1 = Math.ceil(box.bottom * height).toInt().coerceIn(0, height)
+        var count = 0
+        for (y in y0 until y1) for (x in x0 until x1) if (mask[y * width + x]) count++
+        return count
+    }
+}
