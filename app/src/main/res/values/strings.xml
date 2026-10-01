@@ -50,7 +50,6 @@
     <string name="gallery_open_failed">写真アプリを開けませんでした。</string>
     <string name="notification_channel_name">インターバル撮影</string>
     <string name="notification_channel_description">写真の自動撮影中に表示される常駐通知</string>
-    <string name="notification_title">インターバル撮影中（ロック中も継続）</string>
     <string name="notification_stop">停止</string>
     <string name="bubble_description">撮影中。タップしてアプリを開く</string>
 </resources>

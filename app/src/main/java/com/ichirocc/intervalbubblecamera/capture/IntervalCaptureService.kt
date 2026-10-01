@@ -791,13 +791,12 @@ class IntervalCaptureService : LifecycleService() {
         )
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_camera)
-            .setContentTitle(getString(R.string.notification_title))
             .setContentIntent(openAppIntent)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
-            // 撮影状況は表示しない（タイトルと停止ボタンだけ）。
+            // 情報は表示しない（Android の決まりで必要な通知なので、停止ボタンだけ置く）。
             .addAction(R.drawable.ic_stop, getString(R.string.notification_stop), stopIntent)
             .build()
     }
