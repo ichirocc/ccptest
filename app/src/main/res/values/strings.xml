@@ -3,6 +3,17 @@
     <string name="app_name">インターバル・バブルカメラ</string>
     <string name="screen_title">インターバル・バブルカメラ</string>
     <string name="screen_subtitle">指定した間隔で端末の全カメラで撮影して前回の画像と比べ、どれかで動体があったときだけ全カメラの画像を保存します。他のアプリ使用中や画面ロック中も継続します。</string>
+    <string name="status_idle">待機中</string>
+    <string name="status_starting">準備中</string>
+    <string name="status_running">撮影中</string>
+    <string name="status_error">エラー</string>
+    <string name="status_prompt">設定後に「開始してバブル化」を押してください。</string>
+    <string name="photo_count">%1$d枚</string>
+    <string name="photo_count_zero">0枚</string>
+    <string name="last_photo_none">最終保存: まだありません</string>
+    <string name="last_photo_name">最終保存: %1$s</string>
+    <string name="photo_count_with_skipped">%1$d枚（見送り%2$d回）</string>
+    <string name="failed_cameras">直近で撮れなかったカメラ: %1$s</string>
     <string name="section_interval">撮影間隔</string>
     <string name="interval_seconds">%1$d秒</string>
     <string name="interval_1_second">1秒</string>
@@ -50,7 +61,6 @@
     <string name="gallery_open_failed">写真アプリを開けませんでした。</string>
     <string name="notification_channel_name">インターバル撮影</string>
     <string name="notification_channel_description">写真の自動撮影中に表示される常駐通知</string>
-    <string name="notification_title">インターバル撮影中（ロック中も継続）</string>
     <string name="notification_stop">停止</string>
     <string name="bubble_description">撮影中。タップしてアプリを開く</string>
 </resources>

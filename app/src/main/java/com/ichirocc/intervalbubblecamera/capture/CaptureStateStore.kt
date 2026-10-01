@@ -17,6 +17,11 @@ data class CaptureUiState(
     val photoCount: Int = 0,
     val skippedCount: Int = 0,
     val lastPhotoName: String? = null,
+    /** 使っているカメラと撮り方（例: 「カメラ6台・切替: back0, …」）。 */
+    val cameraSummary: String? = null,
+    /** 検出に使っている機種設定と実行先（例: 「Pixel 10 Pro XL・物体 GPU / 姿勢 GPU / 手 CPU」）。 */
+    val detectorSummary: String? = null,
+    val failedCameras: List<String> = emptyList(),
     val detail: String = "設定後に撮影を開始してください。",
 ) {
     val isActive: Boolean
@@ -68,6 +73,19 @@ object CaptureStateStore {
             skippedCount = skipped,
             detail = "動体なしのため保存を見送りました（変化${"%.1f".format(changedRatio * 100)}%・見送り${skipped}回）。",
         )
+    }
+
+    fun updateCameraSummary(summary: String) {
+        mutableState.value = mutableState.value.copy(cameraSummary = summary)
+    }
+
+    fun updateDetectorSummary(summary: String) {
+        mutableState.value = mutableState.value.copy(detectorSummary = summary)
+    }
+
+    fun updateFailedCameras(cameras: List<String>) {
+        if (mutableState.value.failedCameras == cameras) return
+        mutableState.value = mutableState.value.copy(failedCameras = cameras)
     }
 
     fun markCaptureError(message: String) {
