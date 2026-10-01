@@ -16,6 +16,10 @@ import android.provider.MediaStore
 import android.util.Log
 import android.view.OrientationEventListener
 import android.view.Surface
+import androidx.annotation.OptIn
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ConcurrentCamera.SingleCameraConfig
 import androidx.camera.core.ImageCapture
@@ -59,9 +63,10 @@ class IntervalCaptureService : LifecycleService() {
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private var cameraProvider: ProcessCameraProvider? = null
-    private var cameraSelectors: Map<String, CameraSelector> = emptyMap()
+    private var cameraEntries: List<CameraEntry> = emptyList()
+    private var captureGroups: List<List<String>> = emptyList()
     private var boundCaptures: Map<String, ImageCapture> = emptyMap()
-    private var cameraMode = CameraMode.SINGLE
+    private var concurrentPairBound = false
     private var targetRotation = Surface.ROTATION_0
     private var captureJob: Job? = null
     private var bubbleOverlay: BubbleOverlay? = null
@@ -188,42 +193,70 @@ class IntervalCaptureService : LifecycleService() {
         )
     }
 
+    /**
+     * 端末が公開しているカメラを全部使う。前後の 1 組は対応端末なら同時に撮り、
+     * 残りのカメラは 1 台ずつ切り替えて撮る（同時に開けるのは最大 2 台のため）。
+     */
     private fun bindCameras(provider: ProcessCameraProvider) {
-        cameraSelectors = buildMap {
-            if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) {
-                put(LENS_BACK, CameraSelector.DEFAULT_BACK_CAMERA)
-            }
-            if (provider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)) {
-                put(LENS_FRONT, CameraSelector.DEFAULT_FRONT_CAMERA)
-            }
-        }
-        check(cameraSelectors.isNotEmpty()) { "No camera available" }
-
+        cameraEntries = enumerateCameras(provider)
+        check(cameraEntries.isNotEmpty()) { "No camera available" }
         provider.unbindAll()
-        if (cameraSelectors.size == 2 && supportsFrontBackConcurrent(provider)) {
-            val captures = cameraSelectors.mapValues { newImageCapture() }
+        boundCaptures = emptyMap()
+
+        val pair = listOfNotNull(
+            cameraEntries.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_BACK && !it.isPhysical },
+            cameraEntries.firstOrNull { it.lensFacing == CameraSelector.LENS_FACING_FRONT && !it.isPhysical },
+        ).map { it.key }
+        concurrentPairBound = false
+        if (pair.size == 2 && supportsFrontBackConcurrent(provider)) {
             try {
-                provider.bindToLifecycle(
-                    cameraSelectors.map { (lens, selector) ->
-                        SingleCameraConfig(
-                            selector,
-                            UseCaseGroup.Builder().addUseCase(captures.getValue(lens)).build(),
-                            this,
-                        )
-                    },
-                )
-                boundCaptures = captures
-                cameraMode = CameraMode.CONCURRENT
-                return
+                bindGroup(provider, pair)
+                concurrentPairBound = true
             } catch (error: RuntimeException) {
-                Log.w(TAG, "Concurrent front/back binding failed; alternating instead", error)
+                Log.w(TAG, "Concurrent front/back binding failed; switching instead", error)
                 provider.unbindAll()
+                boundCaptures = emptyMap()
             }
         }
 
-        cameraMode = if (cameraSelectors.size == 2) CameraMode.ALTERNATING else CameraMode.SINGLE
-        bindSingle(provider, cameraSelectors.keys.first())
+        captureGroups = if (concurrentPairBound) {
+            listOf(pair) + cameraEntries.filter { it.key !in pair }.map { listOf(it.key) }
+        } else {
+            cameraEntries.map { listOf(it.key) }
+        }
+        if (boundCaptures.isEmpty()) bindGroup(provider, captureGroups.first())
     }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun enumerateCameras(provider: ProcessCameraProvider): List<CameraEntry> {
+        val logical = provider.availableCameraInfos
+            .filter { it.lensFacing == CameraSelector.LENS_FACING_BACK || it.lensFacing == CameraSelector.LENS_FACING_FRONT }
+            .sortedBy { if (it.lensFacing == CameraSelector.LENS_FACING_BACK) 0 else 1 }
+        val knownIds = logical.map { Camera2CameraInfo.from(it).cameraId }.toMutableSet()
+
+        return buildList {
+            for (info in logical) {
+                val logicalId = Camera2CameraInfo.from(info).cameraId
+                add(CameraEntry(cameraKey(info.lensFacing, logicalId), info.cameraSelector, info.lensFacing, false))
+                if (!info.isLogicalMultiCameraSupported) continue
+                // 広角・超広角・望遠などの物理カメラは、単独で公開されていないものだけ追加する。
+                for (physical in info.physicalCameraInfos.sortedBy { Camera2CameraInfo.from(it).cameraId }) {
+                    val physicalId = Camera2CameraInfo.from(physical).cameraId
+                    if (!knownIds.add(physicalId)) continue
+                    val selector = CameraSelector.Builder()
+                        .addCameraFilter { infos: List<CameraInfo> ->
+                            infos.filter { Camera2CameraInfo.from(it).cameraId == logicalId }
+                        }
+                        .setPhysicalCameraId(physicalId)
+                        .build()
+                    add(CameraEntry(cameraKey(physical.lensFacing, physicalId), selector, physical.lensFacing, true))
+                }
+            }
+        }
+    }
+
+    private fun cameraKey(lensFacing: Int, cameraId: String): String =
+        (if (lensFacing == CameraSelector.LENS_FACING_FRONT) LENS_FRONT else LENS_BACK) + cameraId
 
     private fun supportsFrontBackConcurrent(provider: ProcessCameraProvider): Boolean {
         if (!packageManager.hasSystemFeature(PackageManager.FEATURE_CAMERA_CONCURRENT)) return false
@@ -233,12 +266,25 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    private fun bindSingle(provider: ProcessCameraProvider, lens: String) {
-        val capture = newImageCapture()
+    private fun bindGroup(provider: ProcessCameraProvider, keys: List<String>) {
         provider.unbindAll()
         boundCaptures = emptyMap()
-        provider.bindToLifecycle(this, cameraSelectors.getValue(lens), capture)
-        boundCaptures = mapOf(lens to capture)
+        val entries = keys.map { key -> cameraEntries.first { it.key == key } }
+        val captures = keys.associateWith { newImageCapture() }
+        if (entries.size == 1) {
+            provider.bindToLifecycle(this, entries.single().selector, captures.getValue(keys.single()))
+        } else {
+            provider.bindToLifecycle(
+                entries.map { entry ->
+                    SingleCameraConfig(
+                        entry.selector,
+                        UseCaseGroup.Builder().addUseCase(captures.getValue(entry.key)).build(),
+                        this,
+                    )
+                },
+            )
+        }
+        boundCaptures = captures
     }
 
     private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
@@ -247,13 +293,15 @@ class IntervalCaptureService : LifecycleService() {
         .setTargetRotation(targetRotation)
         .build()
 
-    private fun runningDetail(intervalSeconds: Int): String = when (cameraMode) {
-        CameraMode.CONCURRENT ->
-            "${intervalSeconds}秒ごとに前後のカメラで同時に撮影し、動体があるときだけ前後とも保存します。"
-        CameraMode.ALTERNATING ->
-            "この端末は前後の同時撮影に対応していないため、${intervalSeconds}秒ごとに前後を切り替えて撮影し、動体があるときだけ前後とも保存します。"
-        CameraMode.SINGLE ->
-            "カメラが1台のため、${intervalSeconds}秒ごとに1台で撮影し、動体があるときだけ保存します。"
+    private fun runningDetail(intervalSeconds: Int): String {
+        val count = cameraEntries.size
+        val how = when {
+            count == 1 -> "カメラ1台で撮影し"
+            concurrentPairBound && count == 2 -> "前後のカメラで同時に撮影し"
+            concurrentPairBound -> "カメラ${count}台で撮影し（前後は同時、ほかは順に切り替え）"
+            else -> "カメラ${count}台を順に切り替えて撮影し"
+        }
+        return "${intervalSeconds}秒ごとに$how、どれかで動体があるときだけ全カメラの画像を保存します。"
     }
 
     private fun startCaptureLoop(generation: Int) {
@@ -291,7 +339,7 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    /** 前後のカメラをそれぞれ前回の画像と比べ、どちらかで動体があれば前後とも保存する。 */
+    /** カメラごとに前回の画像と比べ、どれかで動体があれば全カメラの画像を保存する。 */
     private suspend fun captureWithMotionCheck(): PhotoResult {
         val shots = captureCameraSet()
         val captured = shots.mapNotNull { (lens, shot) ->
@@ -323,33 +371,34 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    private suspend fun captureCameraSet(): Map<String, InMemoryResult> = when (cameraMode) {
-        CameraMode.CONCURRENT -> coroutineScope {
-            boundCaptures
-                .map { (lens, capture) -> lens to async { captureToMemory(capture) } }
-                .associate { (lens, pending) -> lens to pending.await() }
-        }
-
-        CameraMode.ALTERNATING, CameraMode.SINGLE -> {
-            val provider = cameraProvider
-            // 今つながっているカメラから撮り、切り替えは 1 周につき 1 回で済ませる。
-            val order = cameraSelectors.keys.sortedBy { it !in boundCaptures }
-            order.associateWith { lens ->
-                val capture = boundCaptures[lens] ?: run {
-                    if (provider == null) return@associateWith InMemoryResult.Failed("カメラが準備されていません")
-                    try {
-                        bindSingle(provider, lens)
-                    } catch (error: RuntimeException) {
-                        Log.w(TAG, "Unable to switch to $lens camera", error)
-                        return@associateWith InMemoryResult.Failed("カメラを切り替えられませんでした")
-                    }
-                    // 切り替え直後は露出が合っておらず、暗い画像を動体と誤判定するため待つ。
-                    delay(SWITCH_SETTLE_MS)
-                    boundCaptures.getValue(lens)
+    private suspend fun captureCameraSet(): Map<String, InMemoryResult> {
+        val provider = cameraProvider
+        val results = linkedMapOf<String, InMemoryResult>()
+        // 今つながっている組から撮り、切り替えは 1 周につき (組の数 - 1) 回で済ませる。
+        val groups = captureGroups.sortedBy { it.toSet() != boundCaptures.keys }
+        for (group in groups) {
+            if (group.toSet() != boundCaptures.keys) {
+                if (provider == null) {
+                    group.forEach { results[it] = InMemoryResult.Failed("カメラが準備されていません") }
+                    continue
                 }
-                captureToMemory(capture)
+                try {
+                    bindGroup(provider, group)
+                } catch (error: RuntimeException) {
+                    Log.w(TAG, "Unable to switch to cameras $group", error)
+                    group.forEach { results[it] = InMemoryResult.Failed("カメラを切り替えられませんでした") }
+                    continue
+                }
+                // 切り替え直後は露出が合っておらず、暗い画像を動体と誤判定するため待つ。
+                delay(SWITCH_SETTLE_MS)
+            }
+            val captures = boundCaptures
+            coroutineScope {
+                group.map { key -> key to async { captureToMemory(captures.getValue(key)) } }
+                    .forEach { (key, pending) -> results[key] = pending.await() }
             }
         }
+        return results
     }
 
     private suspend fun captureToMemory(capture: ImageCapture): InMemoryResult =
@@ -584,7 +633,12 @@ class IntervalCaptureService : LifecycleService() {
         data class NoMotion(val changedRatio: Double) : PhotoResult
     }
 
-    private enum class CameraMode { CONCURRENT, ALTERNATING, SINGLE }
+    private class CameraEntry(
+        val key: String,
+        val selector: CameraSelector,
+        val lensFacing: Int,
+        val isPhysical: Boolean,
+    )
 
     private sealed interface InMemoryResult {
         class Captured(val jpeg: ByteArray, val rotationDegrees: Int, val frame: LumaFrame) : InMemoryResult
