@@ -211,6 +211,8 @@ class IntervalCaptureService : LifecycleService() {
                     cameraProvider = provider
                     bindCameras(provider)
                     CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
+                    CaptureStateStore.updateCameraSummary(cameraSummary())
+                    if (targetDetectorTried) publishDetectorSummary()
                     startCaptureLoop(generation)
                 }.onFailure { error ->
                     Log.e(TAG, "Unable to initialize CameraX", error)
@@ -352,6 +354,11 @@ class IntervalCaptureService : LifecycleService() {
         .setTargetRotation(targetRotation)
         .build()
 
+    private fun cameraSummary(): String {
+        val mode = if (concurrentPairBound) "前後同時＋切替" else "切替"
+        return "カメラ${cameraEntries.size}台（$mode）: ${cameraEntries.joinToString { it.key }}"
+    }
+
     private fun runningDetail(intervalSeconds: Int): String {
         val count = cameraEntries.size
         val how = when {
@@ -478,10 +485,17 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
+    private fun publishDetectorSummary() {
+        CaptureStateStore.updateDetectorSummary(
+            "${deviceProfile.label}向け設定・" + (targetDetector?.summary ?: "検出なし（画像の変化だけで判定）"),
+        )
+    }
+
     private fun loadTargetDetector(): TargetDetector? {
         if (!targetDetectorTried) {
             targetDetectorTried = true
             targetDetector = TargetDetector.createOrNull(this, deviceProfile)
+            publishDetectorSummary()
         }
         return targetDetector
     }
@@ -494,12 +508,14 @@ class IntervalCaptureService : LifecycleService() {
         cameraEntries.forEach { entry ->
             consecutiveFailures[entry.key] = if (entry.key in failed) (consecutiveFailures[entry.key] ?: 0) + 1 else 0
         }
+        CaptureStateStore.updateFailedCameras(failed)
         if (!concurrentPairBound) return
         val pair = captureGroups.firstOrNull { it.size > 1 } ?: return
         if (pair.any { (consecutiveFailures[it] ?: 0) >= MAX_CONCURRENT_FAILURES }) {
             Log.w(TAG, "Concurrent capture keeps failing for $pair; switching cameras one by one")
             concurrentPairBound = false
             captureGroups = cameraEntries.map { listOf(it.key) }
+            CaptureStateStore.updateCameraSummary(cameraSummary())
         }
     }
 

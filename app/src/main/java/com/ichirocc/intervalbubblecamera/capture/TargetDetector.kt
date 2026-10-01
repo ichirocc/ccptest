@@ -34,6 +34,8 @@ class TargetDetector private constructor(
     private val poseLandmarker: PoseLandmarker?,
     private val handLandmarker: HandLandmarker?,
     private val detectSize: Int,
+    /** 画面表示用: 検出器ごとの実行先（例: 「物体 GPU / 姿勢 GPU / 手 CPU」）。 */
+    val summary: String,
 ) : AutoCloseable {
 
     /** 撮影した JPEG から対象を検出し、回す前の撮影画像（センサーの向き）の座標で返す。 */
@@ -140,7 +142,8 @@ class TargetDetector private constructor(
         /** 1 つも作れなければ null（その場合は画像の変化だけで判定する）。 */
         fun createOrNull(context: Context, profile: DeviceProfile): TargetDetector? {
             val delegates = profile.delegates.mapNotNull { name -> Delegate.entries.firstOrNull { it.name == name } }
-            val objectDetector = create("object detector", delegates) { delegate ->
+            val used = linkedMapOf<String, String>()
+            val objectDetector = create("object detector", delegates, { used["物体"] = it.name }) { delegate ->
                 ObjectDetector.createFromOptions(
                     context,
                     ObjectDetector.ObjectDetectorOptions.builder()
@@ -152,7 +155,7 @@ class TargetDetector private constructor(
                         .build(),
                 )
             }
-            val poseLandmarker = create("pose landmarker", delegates) { delegate ->
+            val poseLandmarker = create("pose landmarker", delegates, { used["姿勢"] = it.name }) { delegate ->
                 PoseLandmarker.createFromOptions(
                     context,
                     PoseLandmarker.PoseLandmarkerOptions.builder()
@@ -163,7 +166,7 @@ class TargetDetector private constructor(
                         .build(),
                 )
             }
-            val handLandmarker = create("hand landmarker", delegates) { delegate ->
+            val handLandmarker = create("hand landmarker", delegates, { used["手"] = it.name }) { delegate ->
                 HandLandmarker.createFromOptions(
                     context,
                     HandLandmarker.HandLandmarkerOptions.builder()
@@ -175,17 +178,29 @@ class TargetDetector private constructor(
                 )
             }
             if (objectDetector == null && poseLandmarker == null && handLandmarker == null) return null
-            return TargetDetector(objectDetector, poseLandmarker, handLandmarker, profile.detectSize)
+            return TargetDetector(
+                objectDetector,
+                poseLandmarker,
+                handLandmarker,
+                profile.detectSize,
+                used.entries.joinToString(" / ") { "${it.key} ${it.value}" },
+            )
         }
 
         private fun baseOptions(modelAsset: String, delegate: Delegate): BaseOptions =
             BaseOptions.builder().setModelAssetPath(modelAsset).setDelegate(delegate).build()
 
-        private fun <T> create(name: String, delegates: List<Delegate>, build: (Delegate) -> T): T? {
+        private fun <T> create(
+            name: String,
+            delegates: List<Delegate>,
+            onCreated: (Delegate) -> Unit,
+            build: (Delegate) -> T,
+        ): T? {
             for (delegate in delegates) {
                 runCatching { build(delegate) }
                     .onSuccess {
                         Log.i(TAG, "Created $name on $delegate")
+                        onCreated(delegate)
                         return it
                     }
                     .onFailure { Log.w(TAG, "Unable to create $name on $delegate", it) }
