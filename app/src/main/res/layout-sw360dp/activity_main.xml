@@ -237,6 +237,7 @@
                 android:layout_height="wrap_content"
                 android:max="95"
                 android:progressTint="@color/primary"
+                android:progressBackgroundTint="@color/outline"
                 android:thumbTint="@color/primary" />
 
             <LinearLayout
@@ -269,6 +270,7 @@
                 android:layout_height="wrap_content"
                 android:max="199"
                 android:progressTint="@color/primary"
+                android:progressBackgroundTint="@color/outline"
                 android:thumbTint="@color/primary" />
 
             <TextView

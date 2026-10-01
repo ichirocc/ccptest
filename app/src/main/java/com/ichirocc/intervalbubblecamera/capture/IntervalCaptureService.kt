@@ -427,6 +427,7 @@ class IntervalCaptureService : LifecycleService() {
     private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
         .setJpegQuality(deviceProfile.jpegQuality)
+        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
         .setTargetRotation(targetRotation)
         .build()
 
@@ -545,8 +546,14 @@ class IntervalCaptureService : LifecycleService() {
             runCatching {
                 val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
                 val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
+                // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(detections) { box ->
-                    MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    if (pixelMotion.motionDetected) {
+                        MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    } else {
+                        0.0
+                    }
                 }
                 TargetTracker.focusTarget(tracked)
             }.fold(

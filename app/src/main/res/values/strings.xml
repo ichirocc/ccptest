@@ -20,10 +20,10 @@
     <string name="interval_10_seconds">10秒</string>
     <string name="interval_60_seconds">60秒</string>
     <string name="section_motion">動体検知</string>
-    <string name="motion_description">カメラごとに前回の画像と比べ、動いている人（全身・体の一部・手だけ）や車を検出して追跡し、動いたときだけ全カメラの画像を保存します。撮影の前に毎回ピントを合わせ、動体を検知したカメラは動いた位置にピントを合わせて撮り直します。最初の1枚は比較用で保存しません。</string>
+    <string name="motion_description">全カメラで毎回、人（全身・体の一部・手だけ）や車を検出して追跡し、動いたときだけ全カメラの画像を保存します。暗いときは夜景モードに自動で切り替えます。フラッシュは使いません。最初の1回は比較用で保存しません。</string>
     <string name="motion_pixel_label">変化の大きさ（明るさの差）</string>
     <string name="motion_area_label">変化の広さ（画面に占める割合）</string>
-    <string name="motion_threshold_note">明るさの差がこの値より大きい部分が、画面のこの割合以上あれば動体として保存します。値を小さくするほど小さな動きでも保存します。</string>
+    <string name="motion_threshold_note">前回の画像と比べて、明るさの差が「変化の大きさ」より大きい部分が画面の「変化の広さ」以上あり、その変化が写っている人や車に重なると保存します。この閾値に届かない小さな変化でも、人や車の位置が前回から動いていれば保存します。値を小さくするほど小さな動きでも保存します。</string>
     <string name="section_icon_color">バブルの色</string>
     <string name="icon_color_description">フローティングバブルの色を選びます。アプリアイコンには影響しません。</string>
     <string name="icon_color_selected">選択中: %1$s</string>
