@@ -9,6 +9,7 @@ import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
 import com.google.mediapipe.tasks.components.containers.NormalizedLandmark
 import com.google.mediapipe.tasks.core.BaseOptions
+import com.google.mediapipe.tasks.core.Delegate
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import com.google.mediapipe.tasks.vision.objectdetector.ObjectDetector
@@ -23,7 +24,9 @@ import com.ichirocc.intervalbubblecamera.TargetTracker
  * - 物体検出（EfficientDet-Lite0）: 全身・大部分が写った人と車など
  * - 姿勢推定（Pose Landmarker lite）: 見えている関節だけで体の一部（脚・足首・つま先を含む）
  * - 手の検出（Hand Landmarker）: 手だけが写っている場合
- * 作れなかった検出器は使わず、残りで検出する。
+ * 対象機種（Pixel 10 Pro XL・OPPO A5 5G）の GPU で動かし、GPU で作れなかった検出器は CPU で作る。
+ * それでも作れなかった検出器は使わず、残りで検出する。
+ * GPU の検出器は作ったスレッドで使う必要があるため、作成と [detect] は同じ 1 本のスレッドから呼ぶこと。
  */
 class TargetDetector private constructor(
     private val objectDetector: ObjectDetector?,
@@ -135,11 +138,11 @@ class TargetDetector private constructor(
 
         /** 1 つも作れなければ null（その場合は画像の変化だけで判定する）。 */
         fun createOrNull(context: Context): TargetDetector? {
-            val objectDetector = create("object detector") {
+            val objectDetector = create("object detector") { delegate ->
                 ObjectDetector.createFromOptions(
                     context,
                     ObjectDetector.ObjectDetectorOptions.builder()
-                        .setBaseOptions(BaseOptions.builder().setModelAssetPath("efficientdet_lite0.tflite").build())
+                        .setBaseOptions(baseOptions("efficientdet_lite0.tflite", delegate))
                         .setRunningMode(RunningMode.IMAGE)
                         .setScoreThreshold(0.4f)
                         .setMaxResults(10)
@@ -147,22 +150,22 @@ class TargetDetector private constructor(
                         .build(),
                 )
             }
-            val poseLandmarker = create("pose landmarker") {
+            val poseLandmarker = create("pose landmarker") { delegate ->
                 PoseLandmarker.createFromOptions(
                     context,
                     PoseLandmarker.PoseLandmarkerOptions.builder()
-                        .setBaseOptions(BaseOptions.builder().setModelAssetPath("pose_landmarker_lite.task").build())
+                        .setBaseOptions(baseOptions("pose_landmarker_lite.task", delegate))
                         .setRunningMode(RunningMode.IMAGE)
                         .setNumPoses(3)
                         .setMinPoseDetectionConfidence(0.5f)
                         .build(),
                 )
             }
-            val handLandmarker = create("hand landmarker") {
+            val handLandmarker = create("hand landmarker") { delegate ->
                 HandLandmarker.createFromOptions(
                     context,
                     HandLandmarker.HandLandmarkerOptions.builder()
-                        .setBaseOptions(BaseOptions.builder().setModelAssetPath("hand_landmarker.task").build())
+                        .setBaseOptions(baseOptions("hand_landmarker.task", delegate))
                         .setRunningMode(RunningMode.IMAGE)
                         .setNumHands(4)
                         .setMinHandDetectionConfidence(0.5f)
@@ -173,8 +176,19 @@ class TargetDetector private constructor(
             return TargetDetector(objectDetector, poseLandmarker, handLandmarker)
         }
 
-        private fun <T> create(name: String, block: () -> T): T? = runCatching(block)
-            .onFailure { Log.w(TAG, "Unable to create $name", it) }
-            .getOrNull()
+        private fun baseOptions(modelAsset: String, delegate: Delegate): BaseOptions =
+            BaseOptions.builder().setModelAssetPath(modelAsset).setDelegate(delegate).build()
+
+        private fun <T> create(name: String, build: (Delegate) -> T): T? {
+            for (delegate in listOf(Delegate.GPU, Delegate.CPU)) {
+                runCatching { build(delegate) }
+                    .onSuccess {
+                        Log.i(TAG, "Created $name on $delegate")
+                        return it
+                    }
+                    .onFailure { Log.w(TAG, "Unable to create $name on $delegate", it) }
+            }
+            return null
+        }
     }
 }

@@ -9,6 +9,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
 import android.os.Environment
 import android.os.PowerManager
 import android.os.SystemClock
@@ -38,6 +39,8 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
+import com.ichirocc.intervalbubblecamera.CameraCandidate
+import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
@@ -53,6 +56,7 @@ import com.ichirocc.intervalbubblecamera.TargetTracker
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -72,6 +76,8 @@ import kotlin.coroutines.resume
 class IntervalCaptureService : LifecycleService() {
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
     private val captureExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val detectionExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val detectionDispatcher = detectionExecutor.asCoroutineDispatcher()
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraEntries: List<CameraEntry> = emptyList()
     private var captureGroups: List<List<String>> = emptyList()
@@ -251,11 +257,14 @@ class IntervalCaptureService : LifecycleService() {
             .filter { it.lensFacing == CameraSelector.LENS_FACING_BACK || it.lensFacing == CameraSelector.LENS_FACING_FRONT }
             .sortedBy { if (it.lensFacing == CameraSelector.LENS_FACING_BACK) 0 else 1 }
         val knownIds = logical.map { Camera2CameraInfo.from(it).cameraId }.toMutableSet()
+        val candidates = mutableListOf<CameraCandidate>()
 
-        return buildList {
+        val all = buildList {
             for (info in logical) {
                 val logicalId = Camera2CameraInfo.from(info).cameraId
-                add(CameraEntry(cameraKey(info.lensFacing, logicalId), info.cameraSelector, info.lensFacing, false))
+                val logicalKey = cameraKey(info.lensFacing, logicalId)
+                add(CameraEntry(logicalKey, info.cameraSelector, info.lensFacing, false))
+                candidates.add(candidateOf(logicalKey, null, info))
                 if (!info.isLogicalMultiCameraSupported) continue
                 // 広角・超広角・望遠などの物理カメラは、単独で公開されていないものだけ追加する。
                 for (physical in info.physicalCameraInfos.sortedBy { Camera2CameraInfo.from(it).cameraId }) {
@@ -267,10 +276,33 @@ class IntervalCaptureService : LifecycleService() {
                         }
                         .setPhysicalCameraId(physicalId)
                         .build()
-                    add(CameraEntry(cameraKey(physical.lensFacing, physicalId), selector, physical.lensFacing, true))
+                    val physicalKey = cameraKey(physical.lensFacing, physicalId)
+                    add(CameraEntry(physicalKey, selector, physical.lensFacing, true))
+                    candidates.add(candidateOf(physicalKey, logicalKey, physical))
                 }
             }
         }
+
+        val selected = CameraSelectionPolicy.select(candidates).toSet()
+        Log.i(TAG, "Cameras: ${candidates.joinToString { it.key }} -> using $selected")
+        return all.filter { it.key in selected }.ifEmpty { all }
+    }
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun candidateOf(key: String, logicalKey: String?, info: CameraInfo): CameraCandidate {
+        val camera2 = Camera2CameraInfo.from(info)
+        val pixelArray = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+        val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
+        val focalLengths = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        return CameraCandidate(
+            key = key,
+            logicalKey = logicalKey,
+            pixelCount = pixelArray?.let { it.width.toLong() * it.height } ?: Long.MAX_VALUE,
+            isMonochrome = capabilities?.contains(
+                CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MONOCHROME,
+            ) == true,
+            focalLengths = focalLengths?.toList() ?: emptyList(),
+        )
     }
 
     private fun cameraKey(lensFacing: Int, cameraId: String): String =
@@ -413,7 +445,8 @@ class IntervalCaptureService : LifecycleService() {
         // 追跡中の対象がいれば変化が閾値未満でも検出し、ゆっくりした動きも追う。
         if (!pixelMotion.motionDetected && !tracker.hasTracks) return pixelMotion
 
-        return withContext(Dispatchers.Default) {
+        // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
+        return withContext(detectionDispatcher) {
             val detector = loadTargetDetector() ?: return@withContext pixelMotion
             runCatching {
                 val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
@@ -750,8 +783,10 @@ class IntervalCaptureService : LifecycleService() {
         releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
-        targetDetector?.close()
+        val detector = targetDetector
         targetDetector = null
+        detectionExecutor.execute { detector?.close() }
+        detectionExecutor.shutdown()
         if (CaptureStateStore.state.value.isActive) {
             CaptureStateStore.markStopped("撮影サービスが終了しました。")
         }
