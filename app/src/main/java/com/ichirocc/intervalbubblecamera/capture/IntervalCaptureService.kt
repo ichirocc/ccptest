@@ -91,6 +91,8 @@ class IntervalCaptureService : LifecycleService() {
     private var boundCaptures: Map<String, ImageCapture> = emptyMap()
     private var boundCameras: Map<String, Camera> = emptyMap()
     private var concurrentPairBound = false
+    private val consecutiveFailures = mutableMapOf<String, Int>()
+    private var lastFailedCameras: List<String> = emptyList()
     private var targetRotation = Surface.ROTATION_0
     private var captureJob: Job? = null
     private var bubbleOverlay: BubbleOverlay? = null
@@ -171,6 +173,8 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
+        consecutiveFailures.clear()
+        lastFailedCameras = emptyList()
         sessionGeneration += 1
         val generation = sessionGeneration
 
@@ -377,7 +381,10 @@ class IntervalCaptureService : LifecycleService() {
                         updateForegroundNotification()
                     }
 
-                    is PhotoResult.Baseline -> CaptureStateStore.markMotionBaseline()
+                    is PhotoResult.Baseline -> {
+                        CaptureStateStore.markMotionBaseline()
+                        updateForegroundNotification()
+                    }
 
                     is PhotoResult.NoMotion -> {
                         CaptureStateStore.markNoMotion(result.changedRatio)
@@ -407,8 +414,11 @@ class IntervalCaptureService : LifecycleService() {
         val judgements = linkedMapOf<String, MotionResult?>()
         var firstFailure: String? = null
 
+        val failed = mutableListOf<String>()
         forEachCameraGroup { key, shot ->
             if (shot is InMemoryResult.Failed) {
+                Log.w(TAG, "Camera $key failed: ${shot.message}")
+                failed.add(key)
                 if (firstFailure == null) firstFailure = shot.message
                 return@forEachCameraGroup
             }
@@ -423,6 +433,7 @@ class IntervalCaptureService : LifecycleService() {
             shots[key] = captured
             judgements[key] = judgement
         }
+        recordFailures(failed)
         if (shots.isEmpty()) return PhotoResult.Failed(firstFailure ?: "カメラが準備されていません")
 
         return when (val decision = CameraSetMotion.decide(judgements)) {
@@ -491,6 +502,24 @@ class IntervalCaptureService : LifecycleService() {
         return targetDetector
     }
 
+    /**
+     * 撮れなかったカメラを数える。前後同時撮影の組で失敗が続いたら（Pixel 10 Pro XL では前面が
+     * 同時撮影で撮れない）、同時撮影をやめて 1 台ずつ切り替えて撮る。
+     */
+    private fun recordFailures(failed: List<String>) {
+        cameraEntries.forEach { entry ->
+            consecutiveFailures[entry.key] = if (entry.key in failed) (consecutiveFailures[entry.key] ?: 0) + 1 else 0
+        }
+        lastFailedCameras = failed
+        if (!concurrentPairBound) return
+        val pair = captureGroups.firstOrNull { it.size > 1 } ?: return
+        if (pair.any { (consecutiveFailures[it] ?: 0) >= MAX_CONCURRENT_FAILURES }) {
+            Log.w(TAG, "Concurrent capture keeps failing for $pair; switching cameras one by one")
+            concurrentPairBound = false
+            captureGroups = cameraEntries.map { listOf(it.key) }
+        }
+    }
+
     /** 全カメラを組ごとに撮り、撮れた順に [onShot] へ渡す（呼び出し中はその組がつながっている）。 */
     private suspend fun forEachCameraGroup(onShot: suspend (key: String, shot: InMemoryResult) -> Unit) {
         val provider = cameraProvider
@@ -521,6 +550,11 @@ class IntervalCaptureService : LifecycleService() {
                     key to async {
                         // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
                         focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
+                        val first = captureToMemory(captures.getValue(key))
+                        if (first is InMemoryResult.Captured) return@async first
+                        // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
+                        Log.w(TAG, "Retrying camera $key after: ${(first as InMemoryResult.Failed).message}")
+                        delay(deviceProfile.switchSettleMs)
                         captureToMemory(captures.getValue(key))
                     }
                 }.map { (key, pending) -> key to pending.await() }
@@ -571,6 +605,10 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private suspend fun captureToMemory(capture: ImageCapture): InMemoryResult =
+        withTimeoutOrNull(CAPTURE_TIMEOUT_MS) { takePictureToMemory(capture) }
+            ?: InMemoryResult.Failed("撮影が時間内に終わりませんでした")
+
+    private suspend fun takePictureToMemory(capture: ImageCapture): InMemoryResult =
         suspendCancellableCoroutine { continuation ->
             capture.takePicture(
                 captureExecutor,
@@ -712,6 +750,8 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
+        consecutiveFailures.clear()
+        lastFailedCameras = emptyList()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()
@@ -730,6 +770,8 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
+        consecutiveFailures.clear()
+        lastFailedCameras = emptyList()
         orientationListener.disable()
         releaseWakeLock()
         bubbleOverlay?.hide()
@@ -767,8 +809,12 @@ class IntervalCaptureService : LifecycleService() {
             Intent(this, IntervalCaptureService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notificationText = overrideText
-            ?: "${currentIntervalSeconds}秒ごとに動体検知・${state.photoCount}枚保存"
+        val notificationText = overrideText ?: buildString {
+            append("${currentIntervalSeconds}秒ごとに動体検知・カメラ${cameraEntries.size}台")
+            append(if (concurrentPairBound) "（前後同時）" else "（切替）")
+            append("・${state.photoCount}枚保存")
+            if (lastFailedCameras.isNotEmpty()) append("・撮れなかった: ${lastFailedCameras.joinToString()}")
+        }
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_camera)
@@ -842,6 +888,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        private const val CAPTURE_TIMEOUT_MS = 8_000L
+        private const val MAX_CONCURRENT_FAILURES = 2
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
         private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
