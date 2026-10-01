@@ -2,7 +2,6 @@ package com.ichirocc.intervalbubblecamera
 
 import android.Manifest
 import android.content.ActivityNotFoundException
-import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
@@ -164,7 +163,6 @@ class MainActivity : AppCompatActivity() {
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
         )
         renderIconColor()
-        updateLauncherIcon(selectedIconColor, showFailure = false)
     }
 
     private fun configureControls() {
@@ -385,7 +383,6 @@ class MainActivity : AppCompatActivity() {
         selectedIconColor = color
         preferences.edit { putString(KEY_ICON_COLOR, color.storageKey) }
         renderIconColor()
-        updateLauncherIcon(color, showFailure = true)
 
         if (CaptureStateStore.state.value.isActive) {
             runCatching {
@@ -421,28 +418,6 @@ class MainActivity : AppCompatActivity() {
                 if (selected) R.drawable.bg_icon_color_selected else android.R.color.transparent,
             )
         }
-    }
-
-    private fun updateLauncherIcon(color: AppIconColor, showFailure: Boolean) {
-        val updates = AppIconColor.entries.map { candidate ->
-            PackageManager.ComponentEnabledSetting(
-                ComponentName(
-                    packageName,
-                    "$packageName.${candidate.launcherAliasSuffix}",
-                ),
-                if (candidate == color) {
-                    PackageManager.COMPONENT_ENABLED_STATE_ENABLED
-                } else {
-                    PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-                },
-                PackageManager.DONT_KILL_APP,
-            )
-        }
-
-        runCatching { packageManager.setComponentEnabledSettings(updates) }
-            .onFailure {
-                if (showFailure) showMessage(getString(R.string.launcher_icon_update_failed))
-            }
     }
 
     private fun refreshPermissionStatus() {

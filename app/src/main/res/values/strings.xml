@@ -35,7 +35,6 @@
     <string name="icon_color_purple">パープル</string>
     <string name="icon_color_pink">ピンク</string>
     <string name="icon_color_system_note">この色設定はフローティングバブルだけに適用されます。Android右上の緑色カメラ使用表示は変更されません。</string>
-    <string name="launcher_icon_update_failed">ホーム画面のアイコン色を更新できませんでした。端末を再起動して再試行してください。</string>
     <string name="icon_color_live_update_failed">撮影中のバブル色を更新できませんでした。撮影を再開すると反映されます。</string>
     <string name="section_permissions">必要な権限</string>
     <string name="permission_camera">カメラ: %1$s</string>
