@@ -20,21 +20,38 @@ data class MotionResult(
     val center: MotionCenter? = null,
 )
 
-enum class MotionSensitivity(
-    val storageKey: String,
-    val pixelThreshold: Int,
-    val areaThreshold: Double,
-) {
-    LOW("low", pixelThreshold = 40, areaThreshold = 0.03),
-    MEDIUM("medium", pixelThreshold = 28, areaThreshold = 0.01),
-    HIGH("high", pixelThreshold = 18, areaThreshold = 0.003),
-    ;
+/**
+ * 動体と判定する閾値（ユーザーが設定する）。
+ * [pixelThreshold]: 画素の明るさ（0〜255）がこれより大きく変わったら「変化した画素」とする。
+ * [areaPermille]: 変化した画素が画面のこの割合（0.1% 単位）以上なら動体ありとする。
+ */
+data class MotionThreshold(val pixelThreshold: Int, val areaPermille: Int) {
+    init {
+        require(pixelThreshold in PIXEL_MIN..PIXEL_MAX) { "pixelThreshold out of range" }
+        require(areaPermille in AREA_MIN..AREA_MAX) { "areaPermille out of range" }
+    }
+
+    val areaRatio: Double get() = areaPermille / 1000.0
 
     companion object {
-        val DEFAULT = MEDIUM
+        const val PIXEL_MIN = 5
+        const val PIXEL_MAX = 100
+        const val AREA_MIN = 1
+        const val AREA_MAX = 200
+        val DEFAULT = MotionThreshold(pixelThreshold = 28, areaPermille = 10)
 
-        fun fromStorageKey(key: String?): MotionSensitivity =
-            entries.firstOrNull { it.storageKey == key } ?: DEFAULT
+        fun clamped(pixelThreshold: Int, areaPermille: Int): MotionThreshold = MotionThreshold(
+            pixelThreshold.coerceIn(PIXEL_MIN, PIXEL_MAX),
+            areaPermille.coerceIn(AREA_MIN, AREA_MAX),
+        )
+
+        fun pixelFromProgress(progress: Int): Int = (progress + PIXEL_MIN).coerceIn(PIXEL_MIN, PIXEL_MAX)
+        fun progressFromPixel(pixel: Int): Int = pixel.coerceIn(PIXEL_MIN, PIXEL_MAX) - PIXEL_MIN
+        fun areaFromProgress(progress: Int): Int = (progress + AREA_MIN).coerceIn(AREA_MIN, AREA_MAX)
+        fun progressFromArea(area: Int): Int = area.coerceIn(AREA_MIN, AREA_MAX) - AREA_MIN
+
+        /** 0.1% 単位の値を「1.5%」のような表示にする。 */
+        fun formatAreaPercent(areaPermille: Int): String = "${areaPermille / 10}.${areaPermille % 10}%"
     }
 }
 
@@ -49,7 +66,7 @@ object MotionDetector {
     fun compare(
         previous: LumaFrame,
         current: LumaFrame,
-        sensitivity: MotionSensitivity,
+        threshold: MotionThreshold,
     ): MotionResult {
         require(previous.width == current.width && previous.height == current.height) {
             "frames must have the same size"
@@ -62,14 +79,14 @@ object MotionDetector {
         var sumX = 0L
         var sumY = 0L
         for (i in 0 until count) {
-            if (abs(current.pixels[i] - previous.pixels[i] - shift) > sensitivity.pixelThreshold) {
+            if (abs(current.pixels[i] - previous.pixels[i] - shift) > threshold.pixelThreshold) {
                 changed++
                 sumX += i % current.width
                 sumY += i / current.width
             }
         }
         val ratio = changed.toDouble() / count
-        val detected = ratio >= sensitivity.areaThreshold
+        val detected = ratio >= threshold.areaRatio
         val center = if (detected) {
             MotionCenter(
                 x = (sumX.toDouble() / changed + 0.5) / current.width,

@@ -46,7 +46,7 @@ import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
 import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
-import com.ichirocc.intervalbubblecamera.MotionSensitivity
+import com.ichirocc.intervalbubblecamera.MotionThreshold
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Dispatchers
@@ -82,7 +82,7 @@ class IntervalCaptureService : LifecycleService() {
     private var sessionGeneration = 0
     private var currentIntervalSeconds = IntervalPolicy.DEFAULT_SECONDS
     private var currentIconColor = AppIconColor.DEFAULT
-    private var motionSensitivity = MotionSensitivity.DEFAULT
+    private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
     private var wakeLock: PowerManager.WakeLock? = null
@@ -116,10 +116,11 @@ class IntervalCaptureService : LifecycleService() {
                 val iconColor = AppIconColor.fromStorageKey(
                     intent.getStringExtra(EXTRA_ICON_COLOR),
                 )
-                val sensitivity = MotionSensitivity.fromStorageKey(
-                    intent.getStringExtra(EXTRA_MOTION_SENSITIVITY),
+                val threshold = MotionThreshold.clamped(
+                    intent.getIntExtra(EXTRA_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
+                    intent.getIntExtra(EXTRA_MOTION_AREA_PERMILLE, MotionThreshold.DEFAULT.areaPermille),
                 )
-                startCapture(interval, iconColor, sensitivity)
+                startCapture(interval, iconColor, threshold)
             }
 
             ACTION_UPDATE_ICON_COLOR -> updateIconColor(
@@ -136,7 +137,7 @@ class IntervalCaptureService : LifecycleService() {
     private fun startCapture(
         intervalSeconds: Int,
         iconColor: AppIconColor,
-        sensitivity: MotionSensitivity,
+        threshold: MotionThreshold,
     ) {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
@@ -148,7 +149,7 @@ class IntervalCaptureService : LifecycleService() {
 
         currentIntervalSeconds = intervalSeconds
         currentIconColor = iconColor
-        motionSensitivity = sensitivity
+        motionThreshold = threshold
         motionReferences.clear()
         lastMotionCenters.clear()
         sessionGeneration += 1
@@ -368,7 +369,7 @@ class IntervalCaptureService : LifecycleService() {
             }
             var captured = shot as InMemoryResult.Captured
             val judgement = motionReferences[key]?.let {
-                MotionDetector.compare(it, captured.frame, motionSensitivity)
+                MotionDetector.compare(it, captured.frame, motionThreshold)
             }
             val center = judgement?.center
             if (center != null) {
@@ -728,7 +729,8 @@ class IntervalCaptureService : LifecycleService() {
             "com.ichirocc.intervalbubblecamera.action.UPDATE_ICON_COLOR"
         const val EXTRA_INTERVAL_SECONDS = "interval_seconds"
         const val EXTRA_ICON_COLOR = "icon_color"
-        const val EXTRA_MOTION_SENSITIVITY = "motion_sensitivity"
+        const val EXTRA_MOTION_PIXEL_THRESHOLD = "motion_pixel_threshold"
+        const val EXTRA_MOTION_AREA_PERMILLE = "motion_area_permille"
         const val LENS_BACK = "back"
         const val LENS_FRONT = "front"
 

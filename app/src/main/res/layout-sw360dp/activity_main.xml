@@ -119,41 +119,77 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="11sp" />
 
-            <RadioGroup
-                android:id="@+id/motionSensitivityGroup"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="6dp"
+                android:layout_marginTop="10dp"
+                android:gravity="center_vertical"
                 android:orientation="horizontal">
 
-                <RadioButton
-                    android:id="@+id/motionSensitivityLow"
+                <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="@string/motion_sensitivity_low"
+                    android:text="@string/motion_pixel_label"
                     android:textColor="@color/text_primary"
                     android:textSize="14sp" />
 
-                <RadioButton
-                    android:id="@+id/motionSensitivityMedium"
+                <TextView
+                    android:id="@+id/motionPixelValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/motionPixelSeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="95"
+                android:progressTint="@color/primary"
+                android:thumbTint="@color/primary" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:checked="true"
-                    android:text="@string/motion_sensitivity_medium"
+                    android:text="@string/motion_area_label"
                     android:textColor="@color/text_primary"
                     android:textSize="14sp" />
 
-                <RadioButton
-                    android:id="@+id/motionSensitivityHigh"
-                    android:layout_width="0dp"
+                <TextView
+                    android:id="@+id/motionAreaValue"
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="@string/motion_sensitivity_high"
-                    android:textColor="@color/text_primary"
-                    android:textSize="14sp" />
-            </RadioGroup>
+                    android:textColor="@color/primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+            </LinearLayout>
+
+            <SeekBar
+                android:id="@+id/motionAreaSeekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="199"
+                android:progressTint="@color/primary"
+                android:thumbTint="@color/primary" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="@string/motion_threshold_note"
+                android:textColor="@color/text_secondary"
+                android:textSize="11sp" />
         </LinearLayout>
 
         <TextView

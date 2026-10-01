@@ -11,8 +11,6 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.ImageButton
 import android.widget.ImageView
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -36,8 +34,10 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
     private lateinit var intervalValue: TextView
     private lateinit var intervalSeekBar: SeekBar
-    private lateinit var motionSensitivityGroup: RadioGroup
-    private lateinit var motionSensitivityButtons: Map<MotionSensitivity, RadioButton>
+    private lateinit var motionPixelValue: TextView
+    private lateinit var motionPixelSeekBar: SeekBar
+    private lateinit var motionAreaValue: TextView
+    private lateinit var motionAreaSeekBar: SeekBar
     private lateinit var iconColorPreview: ImageView
     private lateinit var iconColorSelectedLabel: TextView
     private lateinit var iconColorButtons: Map<AppIconColor, ImageButton>
@@ -106,12 +106,10 @@ class MainActivity : AppCompatActivity() {
     private fun bindViews() {
         intervalValue = findViewById(R.id.intervalValue)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
-        motionSensitivityGroup = findViewById(R.id.motionSensitivityGroup)
-        motionSensitivityButtons = linkedMapOf(
-            MotionSensitivity.LOW to findViewById(R.id.motionSensitivityLow),
-            MotionSensitivity.MEDIUM to findViewById(R.id.motionSensitivityMedium),
-            MotionSensitivity.HIGH to findViewById(R.id.motionSensitivityHigh),
-        )
+        motionPixelValue = findViewById(R.id.motionPixelValue)
+        motionPixelSeekBar = findViewById(R.id.motionPixelSeekBar)
+        motionAreaValue = findViewById(R.id.motionAreaValue)
+        motionAreaSeekBar = findViewById(R.id.motionAreaSeekBar)
         iconColorPreview = findViewById(R.id.iconColorPreview)
         iconColorSelectedLabel = findViewById(R.id.iconColorSelectedLabel)
         iconColorButtons = linkedMapOf(
@@ -141,10 +139,13 @@ class MainActivity : AppCompatActivity() {
             IntervalPolicy.clampSeconds(savedInterval),
         )
 
-        val savedSensitivity = MotionSensitivity.fromStorageKey(
-            preferences.getString(KEY_MOTION_SENSITIVITY, MotionSensitivity.DEFAULT.storageKey),
+        val savedThreshold = MotionThreshold.clamped(
+            preferences.getInt(KEY_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
+            preferences.getInt(KEY_MOTION_AREA_PERMILLE, MotionThreshold.DEFAULT.areaPermille),
         )
-        motionSensitivityButtons.getValue(savedSensitivity).isChecked = true
+        motionPixelSeekBar.progress = MotionThreshold.progressFromPixel(savedThreshold.pixelThreshold)
+        motionAreaSeekBar.progress = MotionThreshold.progressFromArea(savedThreshold.areaPermille)
+        renderMotionThreshold()
 
         selectedIconColor = AppIconColor.fromStorageKey(
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
@@ -167,9 +168,17 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         })
 
-        motionSensitivityGroup.setOnCheckedChangeListener { _, _ ->
-            preferences.edit { putString(KEY_MOTION_SENSITIVITY, selectedMotionSensitivity().storageKey) }
+        val thresholdListener = object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                renderMotionThreshold()
+                if (fromUser) saveMotionThreshold(selectedMotionThreshold())
+            }
+
+            override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
+            override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
         }
+        motionPixelSeekBar.setOnSeekBarChangeListener(thresholdListener)
+        motionAreaSeekBar.setOnSeekBarChangeListener(thresholdListener)
 
         iconColorButtons.forEach { (color, button) ->
             button.setOnClickListener { selectIconColor(color) }
@@ -213,7 +222,8 @@ class MainActivity : AppCompatActivity() {
 
         val controlsEnabled = !state.isActive
         intervalSeekBar.isEnabled = controlsEnabled
-        motionSensitivityButtons.values.forEach { it.isEnabled = controlsEnabled }
+        motionPixelSeekBar.isEnabled = controlsEnabled
+        motionAreaSeekBar.isEnabled = controlsEnabled
 
         startStopButton.isEnabled = state.phase != CapturePhase.STARTING
         if (state.isActive) {
@@ -236,11 +246,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun selectedMotionSensitivity(): MotionSensitivity =
-        motionSensitivityButtons.entries
-            .firstOrNull { it.value.id == motionSensitivityGroup.checkedRadioButtonId }
-            ?.key
-            ?: MotionSensitivity.DEFAULT
+    private fun selectedMotionThreshold(): MotionThreshold = MotionThreshold(
+        MotionThreshold.pixelFromProgress(motionPixelSeekBar.progress),
+        MotionThreshold.areaFromProgress(motionAreaSeekBar.progress),
+    )
+
+    private fun renderMotionThreshold() {
+        val threshold = selectedMotionThreshold()
+        motionPixelValue.text = threshold.pixelThreshold.toString()
+        motionAreaValue.text = MotionThreshold.formatAreaPercent(threshold.areaPermille)
+    }
+
+    private fun saveMotionThreshold(threshold: MotionThreshold) {
+        preferences.edit {
+            putInt(KEY_MOTION_PIXEL_THRESHOLD, threshold.pixelThreshold)
+            putInt(KEY_MOTION_AREA_PERMILLE, threshold.areaPermille)
+        }
+    }
 
     private fun beginStartFlow() {
         pendingStart = true
@@ -266,10 +288,10 @@ class MainActivity : AppCompatActivity() {
     private fun startCapture() {
         pendingStart = false
         val intervalSeconds = IntervalPolicy.secondsFromSeekProgress(intervalSeekBar.progress)
-        val motionSensitivity = selectedMotionSensitivity()
+        val motionThreshold = selectedMotionThreshold()
+        saveMotionThreshold(motionThreshold)
         preferences.edit {
             putInt(KEY_INTERVAL_SECONDS, intervalSeconds)
-            putString(KEY_MOTION_SENSITIVITY, motionSensitivity.storageKey)
             putString(KEY_ICON_COLOR, selectedIconColor.storageKey)
         }
 
@@ -277,7 +299,8 @@ class MainActivity : AppCompatActivity() {
             action = IntervalCaptureService.ACTION_START
             putExtra(IntervalCaptureService.EXTRA_INTERVAL_SECONDS, intervalSeconds)
             putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
-            putExtra(IntervalCaptureService.EXTRA_MOTION_SENSITIVITY, motionSensitivity.storageKey)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_PIXEL_THRESHOLD, motionThreshold.pixelThreshold)
+            putExtra(IntervalCaptureService.EXTRA_MOTION_AREA_PERMILLE, motionThreshold.areaPermille)
         }
 
         runCatching {
@@ -431,6 +454,7 @@ class MainActivity : AppCompatActivity() {
         private const val PREFERENCES_NAME = "capture_preferences"
         private const val KEY_INTERVAL_SECONDS = "interval_seconds"
         private const val KEY_ICON_COLOR = "icon_color"
-        private const val KEY_MOTION_SENSITIVITY = "motion_sensitivity"
+        private const val KEY_MOTION_PIXEL_THRESHOLD = "motion_pixel_threshold"
+        private const val KEY_MOTION_AREA_PERMILLE = "motion_area_permille"
     }
 }

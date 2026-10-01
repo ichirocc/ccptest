@@ -10,9 +10,9 @@
     <string name="interval_60_seconds">60秒</string>
     <string name="section_motion">動体検知</string>
     <string name="motion_description">カメラごとに前回の画像と比べ、どれかで動体があったときだけ全カメラの画像を保存します。撮影の前に毎回ピントを合わせ、動体を検知したカメラは動いた位置にピントを合わせて撮り直します。最初の1枚は比較用で保存しません。</string>
-    <string name="motion_sensitivity_low">感度 低</string>
-    <string name="motion_sensitivity_medium">感度 中</string>
-    <string name="motion_sensitivity_high">感度 高</string>
+    <string name="motion_pixel_label">変化の大きさ（明るさの差）</string>
+    <string name="motion_area_label">変化の広さ（画面に占める割合）</string>
+    <string name="motion_threshold_note">明るさの差がこの値より大きい部分が、画面のこの割合以上あれば動体として保存します。値を小さくするほど小さな動きでも保存します。</string>
     <string name="section_icon_color">バブルの色</string>
     <string name="icon_color_description">フローティングバブルの色を選びます。アプリアイコンには影響しません。</string>
     <string name="icon_color_selected">選択中: %1$s</string>
