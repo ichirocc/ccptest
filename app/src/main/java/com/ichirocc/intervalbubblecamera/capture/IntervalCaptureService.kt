@@ -46,6 +46,7 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
+import com.ichirocc.intervalbubblecamera.CameraMovement
 import com.ichirocc.intervalbubblecamera.CameraCandidate
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
@@ -104,6 +105,17 @@ class IntervalCaptureService : LifecycleService() {
     private val lightListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             latestLux = event.values.firstOrNull()
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
+
+    /** スマホの今の向き（単位クォータニオン [w, x, y, z]）。センサーが無ければ null。 */
+    @Volatile private var latestOrientation: FloatArray? = null
+    private val orientationAtFrame = mutableMapOf<String, FloatArray>()
+    private val rotationListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            latestOrientation = FloatArray(4).also { SensorManager.getQuaternionFromVector(it, event.values) }
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -186,6 +198,7 @@ class IntervalCaptureService : LifecycleService() {
         currentIconColor = iconColor
         motionThreshold = threshold
         motionReferences.clear()
+        orientationAtFrame.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
         sessionGeneration += 1
@@ -233,7 +246,7 @@ class IntervalCaptureService : LifecycleService() {
                                 .getOrNull()
                             runCatching {
                                 bindCameras(provider)
-                                startLightSensor()
+                                startSensors()
                                 CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
                                 CaptureStateStore.updateCameraSummary(cameraSummary())
                                 if (targetDetectorTried) publishDetectorSummary()
@@ -395,19 +408,32 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    private fun startLightSensor() {
-        val sensorManager = getSystemService(SensorManager::class.java)
-        val light = sensorManager?.getDefaultSensor(Sensor.TYPE_LIGHT)
+    private fun startSensors() {
+        val sensorManager = getSystemService(SensorManager::class.java) ?: return
+        val light = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
         if (light == null) {
             Log.w(TAG, "No light sensor; night mode stays off")
-            return
+        } else {
+            sensorManager.registerListener(lightListener, light, SensorManager.SENSOR_DELAY_NORMAL)
         }
-        sensorManager.registerListener(lightListener, light, SensorManager.SENSOR_DELAY_NORMAL)
+        // 地磁気を使わない向きのセンサー（ジャイロ＋加速度）。手持ちのぶれを測る。
+        val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rotation == null) {
+            Log.w(TAG, "No rotation sensor; phone movement is judged from the image only")
+        } else {
+            sensorManager.registerListener(rotationListener, rotation, SensorManager.SENSOR_DELAY_GAME)
+        }
     }
 
-    private fun stopLightSensor() {
-        getSystemService(SensorManager::class.java)?.unregisterListener(lightListener)
+    private fun stopSensors() {
+        getSystemService(SensorManager::class.java)?.let {
+            it.unregisterListener(lightListener)
+            it.unregisterListener(rotationListener)
+        }
         latestLux = null
+        latestOrientation = null
+        orientationAtFrame.clear()
     }
 
     /**
@@ -495,13 +521,18 @@ class IntervalCaptureService : LifecycleService() {
                 return@forEachCameraGroup
             }
             var captured = shot as InMemoryResult.Captured
-            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured) }
+            val orientation = latestOrientation
+            val rotation = orientationAtFrame[key]?.let { previous ->
+                orientation?.let { CameraMovement.rotationDegrees(previous, it) }
+            }
+            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation) }
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
                 captured = refocusAndRetake(key, center) ?: captured
             }
             motionReferences[key] = captured.frame
+            orientation?.let { orientationAtFrame[key] = it }
             shots[key] = captured
             judgements[key] = judgement
         }
@@ -530,9 +561,17 @@ class IntervalCaptureService : LifecycleService() {
         key: String,
         reference: LumaFrame,
         shot: InMemoryResult.Captured,
+        phoneRotationDegrees: Double?,
     ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
+        // 手持ちなどでスマホ自体が動いた回は、画面全体が変わって人や物が動いたように見えるので動体にしない。
+        // 追跡中の位置も画面ごとずれるため、追跡はやり直す。
+        if (CameraMovement.phoneMoved(phoneRotationDegrees, pixelMotion.changedRatio)) {
+            Log.i(TAG, "Phone moved for $key (rotation=$phoneRotationDegrees, change=${pixelMotion.changedRatio})")
+            tracker.clear()
+            return pixelMotion.copy(motionDetected = false, center = null)
+        }
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
         if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
@@ -828,7 +867,7 @@ class IntervalCaptureService : LifecycleService() {
         lastMotionCenters.clear()
         targetTrackers.clear()
         orientationListener.disable()
-        stopLightSensor()
+        stopSensors()
         releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
@@ -847,7 +886,7 @@ class IntervalCaptureService : LifecycleService() {
         lastMotionCenters.clear()
         targetTrackers.clear()
         orientationListener.disable()
-        stopLightSensor()
+        stopSensors()
         releaseWakeLock()
         bubbleOverlay?.hide()
         bubbleOverlay = null
@@ -901,7 +940,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob?.cancel()
         cameraProvider?.unbindAll()
         orientationListener.disable()
-        stopLightSensor()
+        stopSensors()
         releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
