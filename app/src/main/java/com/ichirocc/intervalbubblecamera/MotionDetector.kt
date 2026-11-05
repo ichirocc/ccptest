@@ -164,6 +164,52 @@ object MovingTargets {
         }
     }
 
+    /** 拡大して人を探す範囲の、変化した部分の大きさに対する余白（片側）。 */
+    const val REGION_MARGIN = 0.5
+
+    /** 拡大して人を探す範囲の最小の幅・高さ（画面に対する割合）。小さすぎると人の全身が入らない。 */
+    const val REGION_MIN_SIZE = 0.2
+
+    /** これより広い範囲は拡大しても細かく見えないので、拡大して探さない。 */
+    const val REGION_MAX_AREA = 0.5
+
+    /**
+     * 変化した部分を囲む、拡大して人を探す範囲（SAHI の考え方。小さく遠い人は画面全体を縮小した画像では
+     * 見つからないので、変化した辺りだけを撮影画像から高い解像度で切り出して探す）。
+     * ばらばらの小さな変化に引っぱられないよう、変化した画素の 5〜95% の位置で囲み、余白をつける。
+     * 変化した画素が少なすぎる、または範囲が広すぎるときは null。
+     */
+    fun changedRegion(mask: BooleanArray, width: Int, height: Int): NormalizedBox? {
+        require(mask.size == width * height) { "mask must be width * height" }
+        val xs = mutableListOf<Int>()
+        val ys = mutableListOf<Int>()
+        for (i in mask.indices) if (mask[i]) {
+            xs.add(i % width)
+            ys.add(i / width)
+        }
+        if (xs.size < MIN_REGION_PIXELS) return null
+        xs.sort()
+        ys.sort()
+        fun at(sorted: List<Int>, q: Double) = sorted[((sorted.size - 1) * q).toInt()]
+        val left = at(xs, 0.05).toDouble() / width
+        val right = (at(xs, 0.95) + 1).toDouble() / width
+        val top = at(ys, 0.05).toDouble() / height
+        val bottom = (at(ys, 0.95) + 1).toDouble() / height
+
+        fun span(lo: Double, hi: Double): Pair<Double, Double> {
+            val size = maxOf((hi - lo) * (1 + 2 * REGION_MARGIN), REGION_MIN_SIZE).coerceAtMost(1.0)
+            val center = (lo + hi) / 2
+            val start = (center - size / 2).coerceIn(0.0, 1.0 - size)
+            return start to start + size
+        }
+        val (l, r) = span(left, right)
+        val (t, b) = span(top, bottom)
+        val region = NormalizedBox(l, t, r, b)
+        return region.takeIf { it.area <= REGION_MAX_AREA }
+    }
+
+    private const val MIN_REGION_PIXELS = 4
+
     /** 変化した画素のうち、枠の中に入っている割合（変化が無ければ 0）。 */
     fun shareOfChangeInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Double {
         val totalChanged = mask.count { it }

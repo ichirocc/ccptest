@@ -98,14 +98,44 @@ class TargetTrackerTest {
     }
 
     @Test
-    fun `the same person found again in another orientation is kept once`() {
-        val upright = person(0.10)
-        val sideways = DetectedTarget(NormalizedBox(0.11, 0.21, 0.31, 0.88), TargetKind.PERSON)
-        val lyingPerson = DetectedTarget(NormalizedBox(0.5, 0.6, 0.95, 0.8), TargetKind.PERSON)
-        val partOfSamePerson = DetectedTarget(upright.box, TargetKind.BODY_PART)
-        assertEquals(
-            listOf(lyingPerson, partOfSamePerson),
-            TargetTracker.newInOtherOrientation(listOf(upright), listOf(sideways, lyingPerson, partOfSamePerson)),
-        )
+    fun `the same person found in several orientations is fused into one weighted box`() {
+        val strong = DetectedTarget(NormalizedBox(0.10, 0.20, 0.30, 0.90), TargetKind.PERSON, score = 0.9)
+        val weak = DetectedTarget(NormalizedBox(0.13, 0.23, 0.33, 0.93), TargetKind.PERSON, score = 0.3)
+        val lyingPerson = DetectedTarget(NormalizedBox(0.5, 0.6, 0.95, 0.8), TargetKind.PERSON, score = 0.6)
+        val partOfSamePerson = DetectedTarget(strong.box, TargetKind.BODY_PART)
+
+        val fused = TargetTracker.fuse(listOf(weak, lyingPerson, strong, partOfSamePerson))
+
+        assertEquals(3, fused.size)
+        val person = fused.single { it.kind == TargetKind.PERSON && it.box.left < 0.4 }
+        // 確からしさで重みをつけた平均（0.9 と 0.3 なので 3:1）。確からしさは高いほう。
+        assertEquals(0.1075, person.box.left, 1e-9)
+        assertEquals(0.9075, person.box.bottom, 1e-9)
+        assertEquals(0.9, person.score, 1e-9)
+        assertTrue(fused.any { it == lyingPerson })
+        assertTrue(fused.any { it.kind == TargetKind.BODY_PART })
+    }
+
+    @Test
+    fun `a low score detection continues an existing track`() {
+        val tracker = TargetTracker()
+        val first = tracker.update(listOf(person(0.10)), noChange).single()
+        val blurred = DetectedTarget(NormalizedBox(0.12, 0.2, 0.32, 0.9), TargetKind.PERSON, score = 0.25)
+        val second = tracker.update(listOf(blurred), noChange).single()
+        assertEquals(first.id, second.id)
+    }
+
+    @Test
+    fun `a low score detection alone does not start a new track`() {
+        val tracker = TargetTracker()
+        val unsure = DetectedTarget(NormalizedBox(0.5, 0.2, 0.7, 0.9), TargetKind.PERSON, score = 0.25)
+        assertTrue(tracker.update(listOf(unsure), allChange).isEmpty())
+        assertFalse(tracker.hasTracks)
+    }
+
+    @Test
+    fun `an unsure person is not a reason to save when the phone moved`() {
+        val unsure = DetectedTarget(NormalizedBox(0.5, 0.2, 0.7, 0.9), TargetKind.PERSON, score = 0.25)
+        assertNull(TargetTracker.personInFrame(listOf(unsure)))
     }
 }

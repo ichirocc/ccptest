@@ -1,6 +1,8 @@
 package com.ichirocc.intervalbubblecamera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MovingTargetsTest {
@@ -50,5 +52,31 @@ class MovingTargetsTest {
         assertEquals(expected.top, actual.top, 1e-9)
         assertEquals(expected.right, actual.right, 1e-9)
         assertEquals(expected.bottom, actual.bottom, 1e-9)
+    }
+
+    private fun mask(changed: (x: Int, y: Int) -> Boolean) = BooleanArray(width * height) { changed(it % width, it / width) }
+
+    @Test
+    fun `a small distant change gives a zoom region around it with a margin`() {
+        // 横 40〜44・縦 30〜35 だけが変わった（遠くの小さな人）。
+        val region = MovingTargets.changedRegion(mask { x, y -> x in 40..44 && y in 30..35 }, width, height)!!
+        assertEquals(MovingTargets.REGION_MIN_SIZE, region.right - region.left, 1e-9)
+        assertEquals(MovingTargets.REGION_MIN_SIZE, region.bottom - region.top, 1e-9)
+        assertTrue(region.left <= 40.0 / width && region.right >= 45.0 / width)
+        assertTrue(region.top <= 30.0 / height && region.bottom >= 36.0 / height)
+    }
+
+    @Test
+    fun `scattered noise does not stretch the zoom region`() {
+        val changed = mask { x, y -> (x in 40..47 && y in 30..39) || (x == 0 && y == 0) || (x == 79 && y == 59) }
+        val region = MovingTargets.changedRegion(changed, width, height)!!
+        assertTrue(region.area <= MovingTargets.REGION_MAX_AREA)
+        assertTrue(region.left > 0.0 && region.right < 1.0)
+    }
+
+    @Test
+    fun `no zoom region for no change or a change over most of the frame`() {
+        assertNull(MovingTargets.changedRegion(mask { _, _ -> false }, width, height))
+        assertNull(MovingTargets.changedRegion(mask { x, _ -> x < 70 }, width, height))
     }
 }
