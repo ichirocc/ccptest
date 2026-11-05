@@ -55,6 +55,8 @@ import com.ichirocc.intervalbubblecamera.CameraSetMotion
 import com.ichirocc.intervalbubblecamera.DetectedTarget
 import com.ichirocc.intervalbubblecamera.DetectionLevel
 import com.ichirocc.intervalbubblecamera.DeviceProfile
+import com.ichirocc.intervalbubblecamera.FrameAlignment
+import com.ichirocc.intervalbubblecamera.FrameShift
 import com.ichirocc.intervalbubblecamera.HeatLevel
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.LumaFrame
@@ -679,20 +681,29 @@ class IntervalCaptureService : LifecycleService() {
         phoneTiltDegrees: Double?,
         lyingFlat: Boolean,
     ): MotionResult {
-        val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
+        val rawMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
-        // 手持ちなどでスマホ自体が動いた回は、画面全体が変わって何でも動いたように見えるので、
-        // 画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が写っていれば保存する。
-        // 追跡中の位置も画面ごとずれるため、追跡はやり直す。
-        val phoneMotion = CameraMovement.judge(phoneRotationDegrees, pixelMotion.changedRatio, phoneTiltDegrees, lyingFlat)
-        val phoneMoved = phoneMotion == PhoneMotion.MOVED
+        val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
+        // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
+        // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
+        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
+        val pixelMotion = compensation?.motion ?: rawMotion
+        // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
+        // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
+        val phoneMoved = phoneMotion == PhoneMotion.MOVED && compensation == null
         // スマホが止まっていて画面の大部分が変わったら、すぐ近くを人が覆った（スマホの上を人がまたいだなど）と
         // みなし、人を検出できなくても保存する。真下や真横から見た人は検出できないことが多いため。
-        val closeSubject = CameraMovement.closeSubject(phoneMotion, pixelMotion.changedRatio)
-        if (phoneMoved) {
+        val closeSubject = CameraMovement.closeSubject(phoneMotion, rawMotion.changedRatio)
+        if (compensation != null) {
+            Log.i(TAG, "Phone moved for $key; compensated ${compensation.shift} (change=${pixelMotion.changedRatio})")
+            tracker.shift(
+                compensation.shift.normalizedX(shot.frame.width),
+                compensation.shift.normalizedY(shot.frame.height),
+            )
+        } else if (phoneMoved) {
             Log.i(
                 TAG,
-                "Phone moved for $key (rotation=$phoneRotationDegrees, tilt=$phoneTiltDegrees, change=${pixelMotion.changedRatio})",
+                "Phone moved for $key (rotation=$phoneRotationDegrees, tilt=$phoneTiltDegrees, change=${rawMotion.changedRatio})",
             )
             tracker.clear()
             phoneMovedCameras.add(key)
@@ -717,7 +728,7 @@ class IntervalCaptureService : LifecycleService() {
                     tracker.update(detections) { 0.0 }
                     return@runCatching TargetTracker.personInFrame(detections)?.box
                 }
-                val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, motionThreshold)
                 if (pixelMotion.motionDetected) {
                     detections = withZoomedDetections(detector, shot, mask, detections, allOrientations)
                 }
@@ -749,6 +760,17 @@ class IntervalCaptureService : LifecycleService() {
                 },
             )
         }
+    }
+
+    /** スマホの動きを打ち消した比べ方の結果。 */
+    private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
+
+    /** 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。 */
+    private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
+        val shift = FrameAlignment.estimate(reference, frame)
+        val motion = FrameAlignment.compareAligned(reference, frame, shift, motionThreshold)
+        if (!FrameAlignment.aligned(motion)) return null
+        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, motionThreshold))
     }
 
     /**

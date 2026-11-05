@@ -107,6 +107,17 @@ class TargetTracker(private val maxMisses: Int = 3) {
         tracks.clear()
     }
 
+    /**
+     * 画面全体が正規化座標で ([dx], [dy]) ずれたとき（スマホが動いた）、追跡中の位置も同じだけずらす。
+     * 追跡をやり直さずに続けられ、ずれを打ち消したうえで人の位置が動いたかが分かる。
+     */
+    fun shift(dx: Double, dy: Double) {
+        for (track in tracks) {
+            val box = track.box
+            track.box = NormalizedBox(box.left + dx, box.top + dy, box.right + dx, box.bottom + dy)
+        }
+    }
+
     private fun similarity(a: NormalizedBox, b: NormalizedBox): Double {
         val iou = iou(a, b)
         if (iou >= MIN_IOU) return 1.0 + iou
