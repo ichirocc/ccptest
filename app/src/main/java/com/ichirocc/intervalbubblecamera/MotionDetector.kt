@@ -24,12 +24,25 @@ data class MotionResult(
  * 動体と判定する閾値（ユーザーが設定する）。
  * [pixelThreshold]: 画素の明るさ（0〜255）がこれより大きく変わったら「変化した画素」とする。
  * [areaPermille]: 変化した画素が画面のこの割合（0.1% 単位）以上なら動体ありとする。
+ * [noise]: 暗い場面で見積もった雑音（[NightMotion]）。あれば、画素の明るさごとに、雑音より十分大きい
+ *   変化だけを「変化した画素」とする（[pixelThresholdAt]。[pixelThreshold] より下げることはない）。
  */
-data class MotionThreshold(val pixelThreshold: Int, val areaPermille: Int) {
+data class MotionThreshold(val pixelThreshold: Int, val areaPermille: Int, val noise: NoiseModel? = null) {
     init {
         require(pixelThreshold in PIXEL_MIN..PIXEL_MAX) { "pixelThreshold out of range" }
         require(areaPermille in AREA_MIN..AREA_MAX) { "areaPermille out of range" }
     }
+
+    /** 明るさごとの閾値（雑音が無ければ 256 段とも [pixelThreshold]）。 */
+    private val thresholds: IntArray by lazy {
+        IntArray(256) { luma ->
+            val fromNoise = noise?.let { NightMotion.thresholdForNoise(it.sigma(luma.toDouble())) } ?: 0
+            maxOf(pixelThreshold, fromNoise)
+        }
+    }
+
+    /** 前回の明るさが [luma]（0〜255）の画素の閾値。 */
+    fun pixelThresholdAt(luma: Int): Int = thresholds[luma.coerceIn(0, 255)]
 
     val areaRatio: Double get() = areaPermille / 1000.0
 
@@ -79,7 +92,7 @@ object MotionDetector {
         var sumX = 0L
         var sumY = 0L
         for (i in 0 until count) {
-            if (abs(current.pixels[i] - previous.pixels[i] - shift) > threshold.pixelThreshold) {
+            if (abs(current.pixels[i] - previous.pixels[i] - shift) > threshold.pixelThresholdAt(previous.pixels[i])) {
                 changed++
                 sumX += i % current.width
                 sumY += i / current.width
@@ -160,7 +173,7 @@ object MovingTargets {
         val count = current.pixels.size
         val shift = ((current.pixels.sum() - previous.pixels.sum()).toDouble() / count).roundToInt()
         return BooleanArray(count) {
-            abs(current.pixels[it] - previous.pixels[it] - shift) > threshold.pixelThreshold
+            abs(current.pixels[it] - previous.pixels[it] - shift) > threshold.pixelThresholdAt(previous.pixels[it])
         }
     }
 

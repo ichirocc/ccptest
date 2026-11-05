@@ -80,7 +80,8 @@ object FrameAlignment {
             val px = x - shift.dx
             val py = y - shift.dy
             px in 0 until width && py in 0 until height &&
-                abs(current.pixels[i] - previous.pixels[py * width + px] - mean) > threshold.pixelThreshold
+                abs(current.pixels[i] - previous.pixels[py * width + px] - mean) >
+                threshold.pixelThresholdAt(previous.pixels[py * width + px])
         }
     }
 

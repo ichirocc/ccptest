@@ -1,6 +1,8 @@
 package com.ichirocc.intervalbubblecamera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThermalPolicyTest {
@@ -45,5 +47,27 @@ class ThermalPolicyTest {
             "本体の温度: 熱い（検出を止めて画像の変化だけで判定・間隔15秒以上）",
             ThermalPolicy.summary(HeatLevel.HOT),
         )
+    }
+
+    @Test
+    fun `a lowered load is not raised again until the forecast is clearly lower`() {
+        assertEquals(HeatLevel.WARM, ThermalPolicy.level(status = 0, headroom = 0.9f, previous = HeatLevel.NORMAL))
+        // 0.85 を少し下回っただけでは戻さない。
+        assertEquals(HeatLevel.WARM, ThermalPolicy.level(status = 0, headroom = 0.83f, previous = HeatLevel.WARM))
+        assertEquals(HeatLevel.NORMAL, ThermalPolicy.level(status = 0, headroom = 0.79f, previous = HeatLevel.WARM))
+        assertEquals(HeatLevel.HOT, ThermalPolicy.level(status = 1, headroom = 0.97f, previous = HeatLevel.HOT))
+        assertEquals(HeatLevel.WARM, ThermalPolicy.level(status = 1, headroom = 0.9f, previous = HeatLevel.HOT))
+        // 熱くなるほうは、すぐに上げる。
+        assertEquals(HeatLevel.CRITICAL, ThermalPolicy.level(status = 4, headroom = null, previous = HeatLevel.WARM))
+    }
+
+    @Test
+    fun `detection is skipped a few times in a row when nothing changed, more when warm`() {
+        assertTrue(DetectionSkipping.shouldSkip(0, HeatLevel.NORMAL))
+        assertTrue(DetectionSkipping.shouldSkip(1, HeatLevel.NORMAL))
+        assertFalse(DetectionSkipping.shouldSkip(2, HeatLevel.NORMAL))
+        assertTrue(DetectionSkipping.shouldSkip(3, HeatLevel.WARM))
+        assertFalse(DetectionSkipping.shouldSkip(4, HeatLevel.WARM))
+        assertTrue(HeatLevel.WARM.detectScale < HeatLevel.NORMAL.detectScale)
     }
 }

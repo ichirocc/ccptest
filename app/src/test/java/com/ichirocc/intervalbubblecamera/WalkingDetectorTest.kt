@@ -67,4 +67,17 @@ class WalkingDetectorTest {
         assertTrue(SteadyMoment.shouldCapture(angularSpeed = 1.5, waitedMs = SteadyMoment.MAX_WAIT_MS))
         assertTrue(SteadyMoment.shouldCapture(angularSpeed = null, waitedMs = 0))
     }
+
+    @Test
+    fun `walking is detected however the phone is held`() {
+        val detector = WalkingDetector()
+        // スマホが斜めに傾いていても（重力が x と z に分かれる）、上下の揺れで歩行が分かる。
+        var t = 0L
+        while (t <= 3_000_000_000L) {
+            val vertical = 9.8 + 2 * sin(2 * PI * 1.8 * t / 1e9)
+            detector.add(t, (vertical * 0.6).toFloat(), 0f, (vertical * 0.8).toFloat())
+            t += stepNanos
+        }
+        assertTrue(detector.isWalking(t - stepNanos))
+    }
 }
