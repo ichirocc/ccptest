@@ -66,6 +66,7 @@ import com.ichirocc.intervalbubblecamera.FrameAlignment
 import com.ichirocc.intervalbubblecamera.FrameShift
 import com.ichirocc.intervalbubblecamera.HeatLevel
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
+import com.ichirocc.intervalbubblecamera.JpegOrientation
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
@@ -215,6 +216,9 @@ class IntervalCaptureService : LifecycleService() {
 
     /** カメラごとの、撮影の質を上げる機能（光学式手ぶれ補正など）。 */
     private val cameraFeatures = mutableMapOf<String, CameraFeatures>()
+
+    /** Ultra HDR（明暗の幅が広い写真）で撮れるカメラ。 */
+    private val ultraHdrCameras = mutableSetOf<String>()
 
     /** 全画素・質を上げる設定でつなげなかった・撮れなかったカメラ（以後はふつうの撮り方で撮る）。 */
     private val fallbackCameras = mutableSetOf<String>()
@@ -457,6 +461,11 @@ class IntervalCaptureService : LifecycleService() {
         val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
         val focalLengths = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
         val sensorSize = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val ultraHdr = runCatching {
+            ImageCapture.getImageCaptureCapabilities(info).supportedOutputFormats
+                .contains(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
+        }.getOrDefault(false)
+        if (ultraHdr) ultraHdrCameras.add(key) else ultraHdrCameras.remove(key)
         cameraFeatures[key] = CameraFeatures(
             opticalStabilization = camera2.getCameraCharacteristic(
                 CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
@@ -655,7 +664,8 @@ class IntervalCaptureService : LifecycleService() {
      * - [fullResolution]: センサーの全画素で撮る（高画素のセンサーは、ふだん 4 画素を 1 つにまとめて撮られる）。
      * - [enhanced]: 遅れの少ない撮影（ZSL。カメラが流し続けている映像から、撮った瞬間の 1 枚を取り出すので
      *   シャッターの遅れがほぼ無い。対応していないカメラではふつうの撮影になる）と、そのカメラが対応していれば
-     *   光学式手ぶれ補正・高品質のノイズ除去・高品質の輪郭の処理。
+     *   光学式手ぶれ補正・高品質のノイズ除去・高品質の輪郭の処理。対応していれば Ultra HDR（明暗の幅が広い写真。
+     *   ふつうの JPEG として読めて、対応した画面では明るい所がより明るく見える）でも撮る。
      */
     @OptIn(ExperimentalCamera2Interop::class)
     private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean): ImageCapture {
@@ -674,6 +684,7 @@ class IntervalCaptureService : LifecycleService() {
                     .build(),
             )
         }
+        if (enhanced && key in ultraHdrCameras) builder.setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
         val features = cameraFeatures[key]
         if (enhanced && features != null) {
             val extender = Camera2Interop.Extender(builder)
@@ -700,7 +711,9 @@ class IntervalCaptureService : LifecycleService() {
             nightModeSwitch.night -> "夜景モード（${nightCameras.joinToString()}）"
             else -> "普通のモード（暗いと${nightCameras.joinToString()}は夜景モード）"
         }
-        return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting"
+        val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras }
+        val hdrLine = if (hdr.isEmpty()) "" else "\nUltra HDR: ${hdr.joinToString()}"
+        return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting$hdrLine"
     }
 
     private fun runningDetail(intervalSeconds: Int): String {
@@ -1256,6 +1269,12 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private fun saveJpeg(jpeg: ByteArray, rotationDegrees: Int, fileName: String) {
+        // 向きは Exif の中でその場で書き換える（ファイルの形が変わらないので Ultra HDR のゲインマップも壊れず、
+        // 一時ファイルを経ないので速い）。その場で書き換えられない JPEG だけ、一時ファイルで Exif を作り直す。
+        if (JpegOrientation.setInPlace(jpeg, exifOrientationOf(rotationDegrees))) {
+            writeToGallery(fileName) { output -> output.write(jpeg) }
+            return
+        }
         val tempFile = File.createTempFile("motion_", ".jpg", cacheDir)
         try {
             tempFile.writeBytes(jpeg)
@@ -1266,34 +1285,36 @@ class IntervalCaptureService : LifecycleService() {
                 )
                 saveAttributes()
             }
-
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(
-                    MediaStore.Images.Media.RELATIVE_PATH,
-                    "${Environment.DIRECTORY_PICTURES}/$ALBUM_NAME",
-                )
-                put(MediaStore.Images.Media.IS_PENDING, 1)
-            }
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                ?: error("保存先を作成できませんでした")
-            try {
-                contentResolver.openOutputStream(uri)?.use { output ->
-                    tempFile.inputStream().use { it.copyTo(output) }
-                } ?: error("保存先を開けませんでした")
-                contentResolver.update(
-                    uri,
-                    ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
-                    null,
-                    null,
-                )
-            } catch (error: Exception) {
-                contentResolver.delete(uri, null, null)
-                throw error
-            }
+            writeToGallery(fileName) { output -> tempFile.inputStream().use { it.copyTo(output) } }
         } finally {
             tempFile.delete()
+        }
+    }
+
+    /** `Pictures/IntervalBubbleCamera` に [fileName] の JPEG を作り、[write] で中身を書く。失敗したら作った項目を消す。 */
+    private fun writeToGallery(fileName: String, write: (java.io.OutputStream) -> Unit) {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(
+                MediaStore.Images.Media.RELATIVE_PATH,
+                "${Environment.DIRECTORY_PICTURES}/$ALBUM_NAME",
+            )
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: error("保存先を作成できませんでした")
+        try {
+            contentResolver.openOutputStream(uri)?.use(write) ?: error("保存先を開けませんでした")
+            contentResolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+        } catch (error: Exception) {
+            contentResolver.delete(uri, null, null)
+            throw error
         }
     }
 
