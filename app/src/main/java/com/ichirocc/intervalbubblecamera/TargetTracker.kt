@@ -109,6 +109,14 @@ class TargetTracker(private val maxMisses: Int = 3) {
             .maxWithOrNull(compareBy<TrackedTarget> { it.kind.isPerson }.thenBy { it.box.area })
 
         /**
+         * スマホが動いた回に保存する理由になる人（全身・体の一部・手）。車などは含めない。
+         * 複数いれば一番大きく写った人（ピントを合わせる対象）。
+         */
+        fun personInFrame(detections: List<DetectedTarget>): DetectedTarget? = detections
+            .filter { it.kind.isPerson }
+            .maxByOrNull { it.box.area }
+
+        /**
          * 姿勢推定や手の検出の関節点（正規化座標）から、見えている点だけで枠を作る。
          * 見えている点が [minPoints] 未満なら null。
          */

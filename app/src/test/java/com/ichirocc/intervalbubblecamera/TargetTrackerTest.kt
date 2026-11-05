@@ -78,4 +78,14 @@ class TargetTrackerTest {
         assertEquals(NormalizedBox(0.4, 0.7, 0.6, 0.95), box)
         assertNull(TargetTracker.boxFromLandmarks(points, listOf(true, false, false, false)))
     }
+
+    @Test
+    fun `a person in frame is found even without movement, and vehicles are not counted`() {
+        val car = DetectedTarget(NormalizedBox(0.0, 0.0, 0.9, 0.9), TargetKind.VEHICLE)
+        val hand = DetectedTarget(NormalizedBox(0.6, 0.6, 0.7, 0.7), TargetKind.HAND)
+        val body = DetectedTarget(NormalizedBox(0.1, 0.1, 0.4, 0.5), TargetKind.BODY_PART)
+        assertEquals(body, TargetTracker.personInFrame(listOf(car, hand, body)))
+        assertNull(TargetTracker.personInFrame(listOf(car)))
+        assertNull(TargetTracker.personInFrame(emptyList()))
+    }
 }
