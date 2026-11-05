@@ -48,6 +48,8 @@
 3. USBデバッグを有効にしたAndroid実機を接続します。
 4. `app` 構成を選び、Runを押します。
 
+プルリクエストを作る・更新するたびと main に入るたびに、GitHub Actions の CI（`.github/workflows/ci.yml`）がユニットテストとデバッグ APK のビルドを行います。
+
 コマンドラインの場合:
 
 ```bash
