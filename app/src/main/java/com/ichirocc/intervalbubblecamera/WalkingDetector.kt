@@ -36,10 +36,11 @@ class WalkingDetector(private val windowNanos: Long = WINDOW_NANOS) {
         val high = mean + STEP_LEVEL * std
         var steps = 0
         var above = false
-        var lastStep = Long.MIN_VALUE
+        // 最初の 1 歩は間隔を問わない（Long.MIN_VALUE から引くとあふれて負になり、1 歩も数えられなかった）。
+        var lastStep: Long? = null
         for (i in magnitudes.indices) {
             val isAbove = magnitudes[i] > high
-            if (isAbove && !above && times[i] - lastStep >= MIN_STEP_INTERVAL_NANOS) {
+            if (isAbove && !above && (lastStep == null || times[i] - lastStep >= MIN_STEP_INTERVAL_NANOS)) {
                 steps++
                 lastStep = times[i]
             }
