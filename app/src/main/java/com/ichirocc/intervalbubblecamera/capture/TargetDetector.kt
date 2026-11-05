@@ -38,15 +38,40 @@ class TargetDetector private constructor(
     val summary: String,
 ) : AutoCloseable {
 
-    /** 撮影した JPEG から対象を検出し、回す前の撮影画像（センサーの向き）の座標で返す。 */
+    /**
+     * 撮影した JPEG から対象を検出し、回す前の撮影画像（センサーの向き）の座標で返す。
+     * まずスマホの向きから見て正立の向き（[rotationDegrees]）で探し、人が見つからなければ
+     * 90°・180°・270° 回した向きでも探す。スマホを逆さ・横にしたとき、平らに置いて向きが
+     * 分からないとき、寝ている人など、人が画像の中で正立していなくても見つけるため
+     * （物体検出・姿勢推定はほぼ正立の人しか見つけられない）。
+     */
     fun detect(jpeg: ByteArray, rotationDegrees: Int): List<DetectedTarget> {
-        val upright = decodeUpright(jpeg, rotationDegrees) ?: return emptyList()
+        val sensorImage = decode(jpeg) ?: return emptyList()
         try {
-            val image = BitmapImageBuilder(upright).build()
-            val found = detectObjects(image, upright) + detectBodyParts(image) + detectHands(image)
-            return found.map { it.copy(box = it.box.unrotate(rotationDegrees)) }
+            val found = mutableListOf<DetectedTarget>()
+            for ((index, rotation) in TargetTracker.detectionRotations(rotationDegrees).withIndex()) {
+                // 正立の向きで人が見つかれば、ほかの向きは探さない（検出の回数を抑える）。
+                if (index > 0 && found.any { it.kind.isPerson }) break
+                val more = detectRotated(sensorImage, rotation, withHands = index == 0)
+                found += TargetTracker.newInOtherOrientation(found, more)
+            }
+            return found
         } finally {
-            upright.recycle()
+            sensorImage.recycle()
+        }
+    }
+
+    /** センサーの向きの画像を時計回りに [rotation] 度回して検出し、センサーの向きの座標に戻す。 */
+    private fun detectRotated(sensorImage: Bitmap, rotation: Int, withHands: Boolean): List<DetectedTarget> {
+        val rotated = rotate(sensorImage, rotation)
+        try {
+            val image = BitmapImageBuilder(rotated).build()
+            // 手の検出は手のひらの向きも推定するので、どの向きでも見つかる。1 回だけ行う。
+            val found = detectObjects(image, rotated) + detectBodyParts(image) +
+                (if (withHands) detectHands(image) else emptyList())
+            return found.map { it.copy(box = it.box.unrotate(rotation)) }
+        } finally {
+            if (rotated !== sensorImage) rotated.recycle()
         }
     }
 
@@ -105,32 +130,33 @@ class TargetDetector private constructor(
     private fun NormalizedLandmark.isVisible(): Boolean =
         visibility().orElse(1f) >= MIN_LANDMARK_VISIBILITY && presence().orElse(1f) >= MIN_LANDMARK_VISIBILITY
 
-    private fun decodeUpright(jpeg: ByteArray, rotationDegrees: Int): Bitmap? {
+    private fun decode(jpeg: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
         var sampleSize = 1
         while (maxOf(bounds.outWidth, bounds.outHeight) / (sampleSize * 2) >= detectSize) sampleSize *= 2
-        val decoded = BitmapFactory.decodeByteArray(
+        return BitmapFactory.decodeByteArray(
             jpeg,
             0,
             jpeg.size,
             BitmapFactory.Options().apply { inSampleSize = sampleSize },
-        ) ?: return null
-        if (rotationDegrees % 360 == 0) return decoded
+        )
+    }
 
-        val rotated = Bitmap.createBitmap(
-            decoded,
+    /** 時計回りに [degrees] 度回した画像（0 度なら元の画像そのもの）。 */
+    private fun rotate(bitmap: Bitmap, degrees: Int): Bitmap {
+        if (degrees % 360 == 0) return bitmap
+        return Bitmap.createBitmap(
+            bitmap,
             0,
             0,
-            decoded.width,
-            decoded.height,
-            Matrix().apply { postRotate(rotationDegrees.toFloat()) },
+            bitmap.width,
+            bitmap.height,
+            Matrix().apply { postRotate(degrees.toFloat()) },
             true,
         )
-        if (rotated !== decoded) decoded.recycle()
-        return rotated
     }
 
     companion object {

@@ -88,4 +88,24 @@ class TargetTrackerTest {
         assertNull(TargetTracker.personInFrame(listOf(car)))
         assertNull(TargetTracker.personInFrame(emptyList()))
     }
+
+    @Test
+    fun `detection tries the upright orientation first and then the other three`() {
+        assertEquals(listOf(0, 90, 180, 270), TargetTracker.detectionRotations(0))
+        assertEquals(listOf(90, 180, 270, 0), TargetTracker.detectionRotations(90))
+        assertEquals(listOf(270, 0, 90, 180), TargetTracker.detectionRotations(270))
+        assertEquals(listOf(180, 270, 0, 90), TargetTracker.detectionRotations(-180))
+    }
+
+    @Test
+    fun `the same person found again in another orientation is kept once`() {
+        val upright = person(0.10)
+        val sideways = DetectedTarget(NormalizedBox(0.11, 0.21, 0.31, 0.88), TargetKind.PERSON)
+        val lyingPerson = DetectedTarget(NormalizedBox(0.5, 0.6, 0.95, 0.8), TargetKind.PERSON)
+        val partOfSamePerson = DetectedTarget(upright.box, TargetKind.BODY_PART)
+        assertEquals(
+            listOf(lyingPerson, partOfSamePerson),
+            TargetTracker.newInOtherOrientation(listOf(upright), listOf(sideways, lyingPerson, partOfSamePerson)),
+        )
+    }
 }

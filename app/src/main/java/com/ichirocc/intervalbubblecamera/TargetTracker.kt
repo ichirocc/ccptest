@@ -108,6 +108,27 @@ class TargetTracker(private val maxMisses: Int = 3) {
             .filter { it.moving }
             .maxWithOrNull(compareBy<TrackedTarget> { it.kind.isPerson }.thenBy { it.box.area })
 
+        /** 同じ対象をいくつかの向きで重ねて見つけたとみなす枠の重なり（IoU）。 */
+        const val DUPLICATE_IOU = 0.5
+
+        /**
+         * 人を探す画像の向き（時計回りの角度）。スマホの向きから見た正立の向き [uprightDegrees] を先に、
+         * 続けて 90° ずつ回した残りの 3 つ。
+         */
+        fun detectionRotations(uprightDegrees: Int): List<Int> {
+            val first = ((uprightDegrees % 360) + 360) % 360 / 90 * 90
+            return (0 until 4).map { (first + it * 90) % 360 }
+        }
+
+        /**
+         * 別の向きで見つけた [more] のうち、それまでの向きで見つけた [found] と重ならないものだけを返す。
+         * 種類が同じで枠が [DUPLICATE_IOU] 以上重なれば同じ対象とし、先に見つけた（正立の向きの）ほうを残す。
+         */
+        fun newInOtherOrientation(found: List<DetectedTarget>, more: List<DetectedTarget>): List<DetectedTarget> =
+            more.filter { detection ->
+                found.none { it.kind == detection.kind && iou(it.box, detection.box) >= DUPLICATE_IOU }
+            }
+
         /**
          * スマホが動いた回に保存する理由になる人（全身・体の一部・手）。車などは含めない。
          * 複数いれば一番大きく写った人（ピントを合わせる対象）。
