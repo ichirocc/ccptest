@@ -64,7 +64,10 @@ import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
 import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
+import com.ichirocc.intervalbubblecamera.LowLightEnhancer
 import com.ichirocc.intervalbubblecamera.MotionThreshold
+import com.ichirocc.intervalbubblecamera.NightMotion
+import com.ichirocc.intervalbubblecamera.Sharpness
 import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.PhoneMotion
@@ -196,6 +199,9 @@ class IntervalCaptureService : LifecycleService() {
     private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
+
+    /** カメラごとの最近の写真のくっきり具合（ぶれた写真を見分けるのに使う）。 */
+    private val sharpnessHistory = mutableMapOf<String, ArrayDeque<Double>>()
     private val targetTrackers = mutableMapOf<String, TargetTracker>()
     private var targetDetector: TargetDetector? = null
     // 検出用のスレッドと main スレッドの両方から読み書きする。
@@ -275,6 +281,7 @@ class IntervalCaptureService : LifecycleService() {
         orientationAtFrame.clear()
         gravityAtFrame.clear()
         lastMotionCenters.clear()
+        sharpnessHistory.clear()
         targetTrackers.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
@@ -662,6 +669,9 @@ class IntervalCaptureService : LifecycleService() {
                 captured = refocusAndRetake(key, center) ?: captured
                 captured.image = null
             }
+            // 保存しそうな写真がいつもよりぶれていたら、止まった瞬間を待って撮り直し、くっきりしたほうを使う。
+            if (judgement?.motionDetected == true) captured = retakeIfBlurry(key, captured)
+            rememberSharpness(key, captured.sharpness)
             motionReferences[key] = captured.frame
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
@@ -722,7 +732,10 @@ class IntervalCaptureService : LifecycleService() {
         lyingFlat: Boolean,
         holderWalking: Boolean,
     ): MotionResult {
-        val rawMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
+        // 暗い場面では雑音だけで変わったように見えるので、雑音に合わせて閾値を上げる（Immerkær 1996）。
+        val threshold = NightMotion.thresholdFor(reference, shot.frame, motionThreshold)
+        if (threshold != motionThreshold) Log.d(TAG, "Dark frame for $key; pixel threshold ${threshold.pixelThreshold}")
+        val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
         // スマホが動いていて、撮影している人も歩いている（体ごと動いている）回は、写っているものに関係なく保存する。
@@ -735,7 +748,7 @@ class IntervalCaptureService : LifecycleService() {
         }
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
-        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
+        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame, threshold) else null
         val pixelMotion = compensation?.motion ?: rawMotion
         // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
         // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
@@ -771,13 +784,20 @@ class IntervalCaptureService : LifecycleService() {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
                 val image = shot.image ?: return@runCatching null
-                var detections = detector.detect(image, shot.rotationDegrees, allOrientations)
+                // 暗い画像は、人の検出に渡す前だけ明るくする（LIME。保存する写真は変えない）。
+                val dark = NightMotion.meanLuma(shot.frame) < LowLightEnhancer.DARK_MEAN
+                val detectImage = if (dark) brightened(image) else image
+                var detections = try {
+                    detector.detect(detectImage, shot.rotationDegrees, allOrientations)
+                } finally {
+                    if (detectImage !== image) detectImage.recycle()
+                }
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
                     return@runCatching TargetTracker.personInFrame(detections)?.box
                 }
-                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, threshold)
                 if (pixelMotion.motionDetected) {
                     detections = withZoomedDetections(detector, shot, mask, detections, allOrientations)
                 }
@@ -811,15 +831,24 @@ class IntervalCaptureService : LifecycleService() {
         })
     }
 
+    /** 暗い画像 [image] を明るくした新しい画像（人の検出用）。 */
+    private fun brightened(image: Bitmap): Bitmap {
+        val width = image.width
+        val height = image.height
+        val pixels = IntArray(width * height)
+        image.getPixels(pixels, 0, width, 0, 0, width, height)
+        return Bitmap.createBitmap(LowLightEnhancer.enhance(pixels, width, height), width, height, Bitmap.Config.ARGB_8888)
+    }
+
     /** スマホの動きを打ち消した比べ方の結果。 */
     private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
 
     /** 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。 */
-    private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
+    private fun compensateShift(reference: LumaFrame, frame: LumaFrame, threshold: MotionThreshold): ShiftCompensation? {
         val shift = FrameAlignment.estimate(reference, frame)
-        val motion = FrameAlignment.compareAligned(reference, frame, shift, motionThreshold)
+        val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, motionThreshold))
+        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold))
     }
 
     /**
@@ -912,8 +941,10 @@ class IntervalCaptureService : LifecycleService() {
                     key to async {
                         // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
                         focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
-                        // 歩きながらなら、1 歩ごとの揺れの合間（スマホがほぼ止まった瞬間）を待って撮る（ぶれを減らす）。
-                        if (walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())) waitForSteadyMoment()
+                        // スマホがほぼ止まった瞬間を待って撮る（ぶれを減らす。lucky imaging）。歩きながらなら 1 歩ごとの
+                        // 揺れの合間まで、手持ちなら手のふるえの合間まで待つ。止まっていれば待たない。
+                        val walking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
+                        waitForSteadyMoment(if (walking) SteadyMoment.MAX_WAIT_MS else SteadyMoment.MAX_WAIT_HANDHELD_MS)
                         val first = captureToMemory(captures.getValue(key))
                         if (first is InMemoryResult.Captured) return@async first
                         // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
@@ -927,10 +958,40 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [SteadyMoment.MAX_WAIT_MS] 待つ。 */
-    private suspend fun waitForSteadyMoment() {
+    /**
+     * [captured] が同じカメラの最近の写真よりぶれていれば（ラプラシアンの分散が中央値の半分未満）、
+     * スマホがほぼ止まる瞬間を待って 1 回だけ撮り直し、くっきりしたほうを返す。
+     */
+    private suspend fun retakeIfBlurry(key: String, captured: InMemoryResult.Captured): InMemoryResult.Captured {
+        if (!Sharpness.isBlurry(captured.sharpness, sharpnessHistory[key].orEmpty())) return captured
+        waitForSteadyMoment(SteadyMoment.MAX_WAIT_MS)
+        val capture = boundCaptures[key] ?: return captured
+        val retake = captureToMemory(capture) as? InMemoryResult.Captured ?: return captured
+        retake.image = null
+        Log.i(TAG, "Blurry shot for $key (${captured.sharpness}); retake ${retake.sharpness}")
+        return if (retake.sharpness > captured.sharpness) retake else captured
+    }
+
+    private fun rememberSharpness(key: String, sharpness: Double) {
+        val history = sharpnessHistory.getOrPut(key) { ArrayDeque() }
+        history.addLast(sharpness)
+        while (history.size > Sharpness.HISTORY) history.removeFirst()
+    }
+
+    /** 縮小画像のくっきり具合（ラプラシアンの分散）。 */
+    private fun sharpnessOf(image: Bitmap): Double {
+        val width = image.width
+        val height = image.height
+        val pixels = IntArray(width * height)
+        image.getPixels(pixels, 0, width, 0, 0, width, height)
+        for (i in pixels.indices) pixels[i] = MotionDetector.lumaOf(pixels[i])
+        return Sharpness.varianceOfLaplacian(pixels, width, height)
+    }
+
+    /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [maxWaitMs] 待つ。 */
+    private suspend fun waitForSteadyMoment(maxWaitMs: Long) {
         val started = SystemClock.elapsedRealtime()
-        while (!SteadyMoment.shouldCapture(currentAngularSpeed(), SystemClock.elapsedRealtime() - started)) {
+        while (!SteadyMoment.shouldCapture(currentAngularSpeed(), SystemClock.elapsedRealtime() - started, maxWaitMs)) {
             delay(STEADY_POLL_MS)
         }
     }
@@ -1015,7 +1076,7 @@ class IntervalCaptureService : LifecycleService() {
                                 InMemoryResult.Failed("画像を解析できませんでした")
                             } else {
                                 val frame = MotionFrameSampler.fromBitmap(small)
-                                InMemoryResult.Captured(jpeg, it.imageInfo.rotationDegrees, frame, small)
+                                InMemoryResult.Captured(jpeg, it.imageInfo.rotationDegrees, frame, small, sharpnessOf(small))
                             }
                         }
                         if (continuation.isActive) continuation.resume(result)
@@ -1142,6 +1203,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        sharpnessHistory.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()
@@ -1161,6 +1223,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        sharpnessHistory.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()
@@ -1257,6 +1320,8 @@ class IntervalCaptureService : LifecycleService() {
             val frame: LumaFrame,
             /** 人の検出用の縮小画像（センサーの向き）。判定が済んだら手放す。 */
             var image: Bitmap?,
+            /** くっきり具合（ラプラシアンの分散）。大きいほどぶれていない。 */
+            val sharpness: Double,
         ) : InMemoryResult
         data class Failed(val message: String) : InMemoryResult
     }

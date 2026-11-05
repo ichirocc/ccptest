@@ -112,10 +112,16 @@ object SteadyMoment {
     /** 回転の速さ（rad/s）がこれ以下なら、撮ってもぶれが小さい（1/30 秒の露出で 0.6° 未満）。 */
     const val STEADY_RAD_PER_SECOND = 0.35
 
-    /** これ以上は待たない（およそ 1 歩。撮影間隔を大きく延ばさないため）。 */
+    /** 歩きながらのとき、これ以上は待たない（およそ 1 歩。撮影間隔を大きく延ばさないため）。 */
     const val MAX_WAIT_MS = 700L
 
-    /** 今撮ってよいか。止まった瞬間か、もう十分待ったなら撮る。速さが分からなければ待たない。 */
-    fun shouldCapture(angularSpeed: Double?, waitedMs: Long): Boolean =
-        angularSpeed == null || angularSpeed <= STEADY_RAD_PER_SECOND || waitedMs >= MAX_WAIT_MS
+    /**
+     * 手持ち（歩いていない）のとき、これ以上は待たない。手のふるえは 1 秒に数回なので、止まる瞬間は
+     * すぐにくる。三脚などで止まっていれば待たずに撮れる。
+     */
+    const val MAX_WAIT_HANDHELD_MS = 400L
+
+    /** 今撮ってよいか。止まった瞬間か、もう [maxWaitMs] 待ったなら撮る。速さが分からなければ待たない。 */
+    fun shouldCapture(angularSpeed: Double?, waitedMs: Long, maxWaitMs: Long = MAX_WAIT_MS): Boolean =
+        angularSpeed == null || angularSpeed <= STEADY_RAD_PER_SECOND || waitedMs >= maxWaitMs
 }
