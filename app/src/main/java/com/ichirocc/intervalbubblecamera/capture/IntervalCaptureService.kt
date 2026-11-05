@@ -16,6 +16,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -26,6 +27,7 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
@@ -36,6 +38,8 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -43,12 +47,15 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.exifinterface.media.ExifInterface
+import java.io.ByteArrayInputStream
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
 import com.ichirocc.intervalbubblecamera.CameraMovement
 import com.ichirocc.intervalbubblecamera.CameraCandidate
+import com.ichirocc.intervalbubblecamera.CameraFeatures
+import com.ichirocc.intervalbubblecamera.CapturePolicy
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
@@ -64,7 +71,12 @@ import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
 import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
+import com.ichirocc.intervalbubblecamera.LowLightEnhancer
 import com.ichirocc.intervalbubblecamera.MotionThreshold
+import com.ichirocc.intervalbubblecamera.NightMotion
+import com.ichirocc.intervalbubblecamera.DetectionSkipping
+import com.ichirocc.intervalbubblecamera.GyroBlur
+import com.ichirocc.intervalbubblecamera.GyroHistory
 import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.PhoneMotion
@@ -140,6 +152,7 @@ class IntervalCaptureService : LifecycleService() {
         override fun onSensorChanged(event: SensorEvent) {
             val (x, y, z) = Triple(event.values[0], event.values[1], event.values[2])
             latestAngularSpeed = Math.sqrt((x * x + y * y + z * z).toDouble())
+            gyroHistory.add(event.timestamp, latestAngularSpeed)
             latestAngularSpeedNanos = event.timestamp
         }
 
@@ -196,6 +209,25 @@ class IntervalCaptureService : LifecycleService() {
     private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
+
+    /** 直近 2 秒の回転の速さ（撮影中の手ぶれを見積もる）。センサーのイベントも読み出しも main スレッド。 */
+    private val gyroHistory = GyroHistory()
+
+    /** カメラごとの、撮影の質を上げる機能（光学式手ぶれ補正など）。 */
+    private val cameraFeatures = mutableMapOf<String, CameraFeatures>()
+
+    /** 全画素・質を上げる設定でつなげなかった・撮れなかったカメラ（以後はふつうの撮り方で撮る）。 */
+    private val fallbackCameras = mutableSetOf<String>()
+
+    /** 今つながっているカメラを、全画素で・質を上げる設定でつないだか。 */
+    private var boundFullResolution = false
+    private var boundEnhanced = false
+
+    /** カメラごとの 焦点距離 ÷ センサーの幅（手ぶれで像がどれだけ流れるかの計算に使う）。 */
+    private val focalOverSensorWidth = mutableMapOf<String, Double>()
+
+    /** カメラごとに、続けて人の検出を省いた回数（[DetectionSkipping]）。 */
+    private val skippedDetections = mutableMapOf<String, Int>()
     private val targetTrackers = mutableMapOf<String, TargetTracker>()
     private var targetDetector: TargetDetector? = null
     // 検出用のスレッドと main スレッドの両方から読み書きする。
@@ -275,6 +307,8 @@ class IntervalCaptureService : LifecycleService() {
         orientationAtFrame.clear()
         gravityAtFrame.clear()
         lastMotionCenters.clear()
+        skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
@@ -422,6 +456,22 @@ class IntervalCaptureService : LifecycleService() {
         val pixelArray = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
         val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
         val focalLengths = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        val sensorSize = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        cameraFeatures[key] = CameraFeatures(
+            opticalStabilization = camera2.getCameraCharacteristic(
+                CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
+            )?.contains(CameraCharacteristics.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
+            highQualityNoiseReduction = camera2.getCameraCharacteristic(
+                CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,
+            )?.contains(CameraCharacteristics.NOISE_REDUCTION_MODE_HIGH_QUALITY) == true,
+            highQualityEdge = camera2.getCameraCharacteristic(
+                CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES,
+            )?.contains(CameraCharacteristics.EDGE_MODE_HIGH_QUALITY) == true,
+        )
+        val focal = focalLengths?.firstOrNull()
+        if (focal != null && sensorSize != null && sensorSize.width > 0f) {
+            focalOverSensorWidth[key] = focal.toDouble() / sensorSize.width
+        }
         return CameraCandidate(
             key = key,
             logicalKey = logicalKey,
@@ -442,8 +492,30 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
-        val captures = keys.associateWith { newImageCapture() }
         val night = wantsNight(keys)
+        val fullResolution = wantsFullResolution(keys)
+        val enhanced = wantsEnhanced(keys)
+        try {
+            bindCaptures(provider, keys, entries, night, fullResolution, enhanced)
+        } catch (error: RuntimeException) {
+            if (!fullResolution && !enhanced) throw error
+            // 全画素・質を上げる設定ではつなげなかった。このカメラはふつうの撮り方に戻す。
+            Log.w(TAG, "Unable to bind $keys with full resolution / enhanced capture; falling back", error)
+            fallbackCameras.addAll(keys)
+            provider.unbindAll()
+            bindCaptures(provider, keys, entries, night, fullResolution = false, enhanced = false)
+        }
+    }
+
+    private fun bindCaptures(
+        provider: ProcessCameraProvider,
+        keys: List<String>,
+        entries: List<CameraEntry>,
+        night: Boolean,
+        fullResolution: Boolean,
+        enhanced: Boolean,
+    ) {
+        val captures = keys.associateWith { newImageCapture(it, fullResolution, enhanced) }
         val cameras = when {
             night -> {
                 // 夜景モードは露出を合わせるために映像の流れが要るので、画面に出さないプレビューも一緒につなぐ。
@@ -465,7 +537,16 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = captures
         boundCameras = keys.zip(cameras).toMap()
         boundNight = night
+        boundFullResolution = fullResolution
+        boundEnhanced = enhanced
+        if (fullResolution || enhanced) Log.i(TAG, "Bound $keys (full resolution=$fullResolution, enhanced=$enhanced)")
     }
+
+    private fun wantsFullResolution(keys: List<String>): Boolean =
+        CapturePolicy.useFullResolution(deviceProfile, heatLevel, wantsNight(keys), keys.any { it in fallbackCameras })
+
+    private fun wantsEnhanced(keys: List<String>): Boolean =
+        CapturePolicy.useEnhancedCapture(wantsNight(keys), keys.any { it in fallbackCameras })
 
     private fun wantsNight(keys: List<String>): Boolean =
         nightModeSwitch.night && keys.size == 1 && cameraEntries.first { it.key == keys.single() }.nightSelector != null
@@ -532,6 +613,7 @@ class IntervalCaptureService : LifecycleService() {
         latestGravity = null
         walkingDetector.clear()
         latestAngularSpeedNanos = 0L
+        gyroHistory.clear()
         latestGravityNanos = 0L
         gravityAtFrame.clear()
         latestLux = null
@@ -568,12 +650,48 @@ class IntervalCaptureService : LifecycleService() {
         CaptureStateStore.updateCameraSummary(cameraSummary())
     }
 
-    private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        .setJpegQuality(deviceProfile.jpegQuality)
-        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-        .setTargetRotation(targetRotation)
-        .build()
+    /**
+     * カメラ [key] の撮影の設定。
+     * - [fullResolution]: センサーの全画素で撮る（高画素のセンサーは、ふだん 4 画素を 1 つにまとめて撮られる）。
+     * - [enhanced]: 遅れの少ない撮影（ZSL。カメラが流し続けている映像から、撮った瞬間の 1 枚を取り出すので
+     *   シャッターの遅れがほぼ無い。対応していないカメラではふつうの撮影になる）と、そのカメラが対応していれば
+     *   光学式手ぶれ補正・高品質のノイズ除去・高品質の輪郭の処理。
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean): ImageCapture {
+        val builder = ImageCapture.Builder()
+            .setCaptureMode(
+                if (enhanced) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+            )
+            .setJpegQuality(deviceProfile.jpegQuality)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+            .setTargetRotation(targetRotation)
+        if (fullResolution) {
+            builder.setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                    .build(),
+            )
+        }
+        val features = cameraFeatures[key]
+        if (enhanced && features != null) {
+            val extender = Camera2Interop.Extender(builder)
+            if (features.opticalStabilization) {
+                extender.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON,
+                )
+            }
+            if (features.highQualityNoiseReduction) {
+                extender.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+            }
+            if (features.highQualityEdge) {
+                extender.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+            }
+        }
+        return builder.build()
+    }
 
     private fun cameraSummary(): String {
         val nightCameras = cameraEntries.filter { it.nightSelector != null }.map { it.key }
@@ -662,6 +780,8 @@ class IntervalCaptureService : LifecycleService() {
                 captured = refocusAndRetake(key, center) ?: captured
                 captured.image = null
             }
+            // 保存しそうな写真がいつもよりぶれていたら、止まった瞬間を待って撮り直し、くっきりしたほうを使う。
+            if (judgement?.motionDetected == true) captured = retakeIfBlurry(key, captured)
             motionReferences[key] = captured.frame
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
@@ -722,7 +842,11 @@ class IntervalCaptureService : LifecycleService() {
         lyingFlat: Boolean,
         holderWalking: Boolean,
     ): MotionResult {
-        val rawMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
+        // 暗い場面では雑音だけで変わったように見えるので、前回との差から明るさごとの雑音を見積もり、
+        // 雑音より十分大きい変化だけを数える（ELD の雑音のモデル。NightMotion）。
+        val threshold = NightMotion.thresholdFor(reference, shot.frame, motionThreshold)
+        threshold.noise?.let { Log.d(TAG, "Dark frame for $key; noise $it") }
+        val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
         // スマホが動いていて、撮影している人も歩いている（体ごと動いている）回は、写っているものに関係なく保存する。
@@ -735,7 +859,7 @@ class IntervalCaptureService : LifecycleService() {
         }
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
-        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
+        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame, threshold) else null
         val pixelMotion = compensation?.motion ?: rawMotion
         // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
         // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
@@ -765,19 +889,36 @@ class IntervalCaptureService : LifecycleService() {
         // （何も変わっていない回まで 4 回検出すると発熱が大きいため）。
         val allOrientations = heatLevel.detection == DetectionLevel.ALL_ORIENTATIONS &&
             (pixelMotion.motionDetected || phoneMoved || tracker.hasTracks)
+        // 画像が変わっておらず、追跡中の人もいない回は、重い検出を省く（Reducto）。続けて省くのは数回まで。
+        val nothingChanged = !pixelMotion.motionDetected && !tracker.hasTracks &&
+            phoneMotion != PhoneMotion.MOVED && !closeSubject && !walkingShot
+        val skipped = skippedDetections[key] ?: 0
+        if (nothingChanged && DetectionSkipping.shouldSkip(skipped, heatLevel)) {
+            skippedDetections[key] = skipped + 1
+            return finish(withoutDetection)
+        }
+        skippedDetections[key] = 0
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
         return finish(withContext(detectionDispatcher) {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
                 val image = shot.image ?: return@runCatching null
-                var detections = detector.detect(image, shot.rotationDegrees, allOrientations)
+                // 暗い画像は、人の検出に渡す前だけ明るくする（Zero-DCE の曲線。保存する写真は変えない）。
+                // やや熱いときは小さくしてから検出する（ApproxDet。速く、熱を出さない）。
+                val dark = NightMotion.meanLuma(shot.frame) < LowLightEnhancer.DARK_MEAN
+                val detectImage = imageForDetection(image, dark, heatLevel.detectScale)
+                var detections = try {
+                    detector.detect(detectImage, shot.rotationDegrees, allOrientations)
+                } finally {
+                    if (detectImage !== image) detectImage.recycle()
+                }
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
                     return@runCatching TargetTracker.personInFrame(detections)?.box
                 }
-                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, threshold)
                 if (pixelMotion.motionDetected) {
                     detections = withZoomedDetections(detector, shot, mask, detections, allOrientations)
                 }
@@ -811,15 +952,39 @@ class IntervalCaptureService : LifecycleService() {
         })
     }
 
+    /**
+     * 人の検出に渡す画像。[scale] が 1 未満なら縮め、[dark] なら明るくする。どちらも無ければ [image] そのもの
+     * （呼び出した側は、[image] と違う画像が返ったら使い終わったら手放す）。
+     */
+    private fun imageForDetection(image: Bitmap, dark: Boolean, scale: Double): Bitmap {
+        val scaled = if (scale < 1.0) {
+            Bitmap.createScaledBitmap(
+                image,
+                (image.width * scale).toInt().coerceAtLeast(1),
+                (image.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else {
+            image
+        }
+        if (!dark) return scaled
+        val width = scaled.width
+        val height = scaled.height
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        if (scaled !== image) scaled.recycle()
+        return Bitmap.createBitmap(LowLightEnhancer.enhance(pixels), width, height, Bitmap.Config.ARGB_8888)
+    }
+
     /** スマホの動きを打ち消した比べ方の結果。 */
     private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
 
     /** 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。 */
-    private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
+    private fun compensateShift(reference: LumaFrame, frame: LumaFrame, threshold: MotionThreshold): ShiftCompensation? {
         val shift = FrameAlignment.estimate(reference, frame)
-        val motion = FrameAlignment.compareAligned(reference, frame, shift, motionThreshold)
+        val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, motionThreshold))
+        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold))
     }
 
     /**
@@ -862,7 +1027,7 @@ class IntervalCaptureService : LifecycleService() {
             .getOrNull()
             ?.takeUnless { it.isNaN() }
         if (headroom != null) lastHeadroom = headroom
-        val level = ThermalPolicy.level(powerManager.currentThermalStatus, lastHeadroom)
+        val level = ThermalPolicy.level(powerManager.currentThermalStatus, lastHeadroom, heatLevel)
         if (level == heatLevel) return
         Log.i(TAG, "Heat level ${heatLevel} -> $level (status=${powerManager.currentThermalStatus}, headroom=$lastHeadroom)")
         heatLevel = level
@@ -912,14 +1077,22 @@ class IntervalCaptureService : LifecycleService() {
                     key to async {
                         // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
                         focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
-                        // 歩きながらなら、1 歩ごとの揺れの合間（スマホがほぼ止まった瞬間）を待って撮る（ぶれを減らす）。
-                        if (walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())) waitForSteadyMoment()
+                        // スマホがほぼ止まった瞬間を待って撮る（ぶれを減らす。ジャイロで回転を測る）。歩きながらなら 1 歩ごとの
+                        // 揺れの合間まで、手持ちなら手のふるえの合間まで待つ。止まっていれば待たない。
+                        val walking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
+                        waitForSteadyMoment(if (walking) SteadyMoment.MAX_WAIT_MS else SteadyMoment.MAX_WAIT_HANDHELD_MS)
                         val first = captureToMemory(captures.getValue(key))
                         if (first is InMemoryResult.Captured) return@async first
                         // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
                         Log.w(TAG, "Retrying camera $key after: ${(first as InMemoryResult.Failed).message}")
                         delay(deviceProfile.switchSettleMs)
-                        captureToMemory(captures.getValue(key))
+                        val second = captureToMemory(captures.getValue(key))
+                        if (second is InMemoryResult.Failed && (boundFullResolution || boundEnhanced)) {
+                            // 全画素・質を上げる設定では撮れないカメラ。次からはふつうの撮り方でつなぐ。
+                            Log.w(TAG, "Camera $key failed twice with full resolution / enhanced capture; falling back")
+                            fallbackCameras.add(key)
+                        }
+                        second
                     }
                 }.map { (key, pending) -> key to pending.await() }
             }
@@ -927,10 +1100,40 @@ class IntervalCaptureService : LifecycleService() {
         }
     }
 
-    /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [SteadyMoment.MAX_WAIT_MS] 待つ。 */
-    private suspend fun waitForSteadyMoment() {
+    /**
+     * [captured] の撮影中に手ぶれで像が流れていれば（ジャイロで見積もる。[GyroBlur]）、スマホがほぼ止まる
+     * 瞬間を待って 1 回だけ撮り直し、ぶれの小さいほうを返す。見積もれなければそのまま。
+     */
+    private suspend fun retakeIfBlurry(key: String, captured: InMemoryResult.Captured): InMemoryResult.Captured {
+        val blur = blurOf(key, captured) ?: return captured
+        if (!GyroBlur.isBlurry(blur)) return captured
+        waitForSteadyMoment(SteadyMoment.MAX_WAIT_MS)
+        val capture = boundCaptures[key] ?: return captured
+        val retake = captureToMemory(capture) as? InMemoryResult.Captured ?: return captured
+        retake.image = null
+        val retakeBlur = blurOf(key, retake)
+        Log.i(TAG, "Blurry shot for $key (blur=$blur of the width); retake blur=$retakeBlur")
+        return if (retakeBlur != null && retakeBlur < blur) retake else captured
+    }
+
+    /**
+     * 撮影中（センサーの露出の始まりから露出時間のあいだ）の手ぶれによる像の流れの、画像の幅に対する割合。
+     * 露出時間・撮影の時刻・ジャイロの記録・焦点距離のどれかが分からなければ null。
+     */
+    private fun blurOf(key: String, shot: InMemoryResult.Captured): Double? {
+        val exposure = shot.exposureSeconds ?: return null
+        val ratio = focalOverSensorWidth[key] ?: return null
+        val start = shot.sensorTimestampNanos
+        val end = start + (exposure * 1e9).toLong()
+        val speed = gyroHistory.maxBetween(start - GyroBlur.SEARCH_MARGIN_NANOS, end + GyroBlur.SEARCH_MARGIN_NANOS)
+            ?: return null
+        return GyroBlur.blurFraction(speed, exposure, ratio)
+    }
+
+    /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [maxWaitMs] 待つ。 */
+    private suspend fun waitForSteadyMoment(maxWaitMs: Long) {
         val started = SystemClock.elapsedRealtime()
-        while (!SteadyMoment.shouldCapture(currentAngularSpeed(), SystemClock.elapsedRealtime() - started)) {
+        while (!SteadyMoment.shouldCapture(currentAngularSpeed(), SystemClock.elapsedRealtime() - started, maxWaitMs)) {
             delay(STEADY_POLL_MS)
         }
     }
@@ -942,7 +1145,8 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private fun isBound(group: List<String>): Boolean =
-        group.toSet() == boundCaptures.keys && boundNight == wantsNight(group)
+        group.toSet() == boundCaptures.keys && boundNight == wantsNight(group) &&
+            boundFullResolution == wantsFullResolution(group) && boundEnhanced == wantsEnhanced(group)
 
     /** 動いた位置にピントを合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
@@ -1015,7 +1219,15 @@ class IntervalCaptureService : LifecycleService() {
                                 InMemoryResult.Failed("画像を解析できませんでした")
                             } else {
                                 val frame = MotionFrameSampler.fromBitmap(small)
-                                InMemoryResult.Captured(jpeg, it.imageInfo.rotationDegrees, frame, small)
+                                InMemoryResult.Captured(
+                                    jpeg,
+                                    it.imageInfo.rotationDegrees,
+                                    frame,
+                                    small,
+                                    // 露出の始まりの時刻（ジャイロと同じ時計）と露出時間。手ぶれの見積もりに使う。
+                                    sensorTimestampNanos = it.imageInfo.timestamp,
+                                    exposureSeconds = exposureSecondsOf(jpeg),
+                                )
                             }
                         }
                         if (continuation.isActive) continuation.resume(result)
@@ -1030,6 +1242,11 @@ class IntervalCaptureService : LifecycleService() {
                 },
             )
         }
+
+    /** JPEG の Exif に書かれた露出時間（秒）。無ければ null。 */
+    private fun exposureSecondsOf(jpeg: ByteArray): Double? = runCatching {
+        ExifInterface(ByteArrayInputStream(jpeg)).getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, -1.0)
+    }.getOrNull()?.takeIf { it > 0.0 }
 
     private fun saveCameraSet(shots: Map<String, Pair<ByteArray, Int>>): List<String> {
         val stamp = FILE_DATE_FORMAT.format(LocalDateTime.now())
@@ -1142,6 +1359,8 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()
@@ -1161,6 +1380,8 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         motionReferences.clear()
         lastMotionCenters.clear()
+        skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()
@@ -1257,6 +1478,10 @@ class IntervalCaptureService : LifecycleService() {
             val frame: LumaFrame,
             /** 人の検出用の縮小画像（センサーの向き）。判定が済んだら手放す。 */
             var image: Bitmap?,
+            /** 露出の始まりの時刻（SystemClock.elapsedRealtimeNanos と同じ時計）。 */
+            val sensorTimestampNanos: Long,
+            /** 露出時間（秒）。JPEG の Exif から。分からなければ null。 */
+            val exposureSeconds: Double?,
         ) : InMemoryResult
         data class Failed(val message: String) : InMemoryResult
     }
