@@ -51,7 +51,9 @@ import com.ichirocc.intervalbubblecamera.CameraCandidate
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
+import com.ichirocc.intervalbubblecamera.DetectionLevel
 import com.ichirocc.intervalbubblecamera.DeviceProfile
+import com.ichirocc.intervalbubblecamera.HeatLevel
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
@@ -63,6 +65,7 @@ import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
+import com.ichirocc.intervalbubblecamera.ThermalPolicy
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -139,6 +142,12 @@ class IntervalCaptureService : LifecycleService() {
     private val targetTrackers = mutableMapOf<String, TargetTracker>()
     private var targetDetector: TargetDetector? = null
     private var targetDetectorTried = false
+
+    /** 本体の温度の段階（1 周ごとに測り直す）。 */
+    private var heatLevel = HeatLevel.NORMAL
+
+    /** 直近に測れた温度の見込み（測れない・呼び出しが早すぎて NaN のときは前回の値を使う）。 */
+    private var lastHeadroom: Float? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var orientationListener: OrientationEventListener
 
@@ -256,7 +265,7 @@ class IntervalCaptureService : LifecycleService() {
                                 startSensors()
                                 CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
                                 CaptureStateStore.updateCameraSummary(cameraSummary())
-                                if (targetDetectorTried) publishDetectorSummary()
+                                publishDetectorSummary()
                                 startCaptureLoop(generation)
                             }.onFailure { error -> failToStartCamera(error) }
                         },
@@ -498,6 +507,7 @@ class IntervalCaptureService : LifecycleService() {
         captureJob = lifecycleScope.launch {
             while (isActive && generation == sessionGeneration) {
                 refreshWakeLock()
+                updateHeatLevel()
                 val startedAt = SystemClock.elapsedRealtime()
                 val result = captureWithMotionCheck()
                 if (generation != sessionGeneration) break
@@ -514,7 +524,8 @@ class IntervalCaptureService : LifecycleService() {
                 }
 
                 val captureDuration = SystemClock.elapsedRealtime() - startedAt
-                delay(IntervalPolicy.delayAfterCapture(currentIntervalSeconds, captureDuration))
+                // 本体が熱いときは間隔を延ばし、撮影が長引いても 1 周ごとに必ず休んで冷ます。
+                delay(ThermalPolicy.delayAfterCapture(currentIntervalSeconds, captureDuration, heatLevel))
             }
         }
     }
@@ -600,16 +611,17 @@ class IntervalCaptureService : LifecycleService() {
         val withoutDetection = if (phoneMoved) pixelMotion.copy(motionDetected = false, center = null) else pixelMotion
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
-        if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
-            Log.w(TAG, "Thermal status ${powerManager.currentThermalStatus}; skipping detection")
-            return withoutDetection
-        }
+        if (heatLevel.detection == DetectionLevel.NONE) return withoutDetection
+        // 正立以外の向きでも探すのは、温度が普通で、画像が変わった・追跡中の対象がいる・スマホが動いた回だけ
+        // （何も変わっていない回まで 4 回検出すると発熱が大きいため）。
+        val allOrientations = heatLevel.detection == DetectionLevel.ALL_ORIENTATIONS &&
+            (pixelMotion.motionDetected || phoneMoved || tracker.hasTracks)
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
         return withContext(detectionDispatcher) {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
-                val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
+                val detections = detector.detect(shot.jpeg, shot.rotationDegrees, allOrientations)
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
@@ -644,9 +656,24 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private fun publishDetectorSummary() {
-        CaptureStateStore.updateDetectorSummary(
-            "${deviceProfile.label}向け設定・" + (targetDetector?.summary ?: "検出なし（画像の変化だけで判定）"),
-        )
+        val detector = when {
+            !targetDetectorTried -> null
+            else -> "${deviceProfile.label}向け設定・" + (targetDetector?.summary ?: "検出なし（画像の変化だけで判定）")
+        }
+        CaptureStateStore.updateDetectorSummary(listOfNotNull(detector, ThermalPolicy.summary(heatLevel)).joinToString("\n"))
+    }
+
+    /** 本体の温度を測り直し、段階が変わったら画面の表示も変える。 */
+    private fun updateHeatLevel() {
+        val headroom = runCatching { powerManager.getThermalHeadroom(HEADROOM_FORECAST_SECONDS) }
+            .getOrNull()
+            ?.takeUnless { it.isNaN() }
+        if (headroom != null) lastHeadroom = headroom
+        val level = ThermalPolicy.level(powerManager.currentThermalStatus, lastHeadroom)
+        if (level == heatLevel) return
+        Log.i(TAG, "Heat level ${heatLevel} -> $level (status=${powerManager.currentThermalStatus}, headroom=$lastHeadroom)")
+        heatLevel = level
+        publishDetectorSummary()
     }
 
     private fun loadTargetDetector(): TargetDetector? {
@@ -1025,6 +1052,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** 何秒先の温度の見込みで負荷を下げるか。 */
+        private const val HEADROOM_FORECAST_SECONDS = 10
         /** これより古い向きのセンサーの値は使わない（画面オフなどで届かなくなったとき）。 */
         private const val ORIENTATION_MAX_AGE_NANOS = 1_000_000_000L
         // 夜景モードは 1 枚に数秒かかるため長めに待つ。

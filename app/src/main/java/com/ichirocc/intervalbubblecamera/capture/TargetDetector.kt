@@ -44,12 +44,14 @@ class TargetDetector private constructor(
      * 90°・180°・270° 回した向きでも探す。スマホを逆さ・横にしたとき、平らに置いて向きが
      * 分からないとき、寝ている人など、人が画像の中で正立していなくても見つけるため
      * （物体検出・姿勢推定はほぼ正立の人しか見つけられない）。
+     * [allOrientations] が false なら正立の向きだけで探す（発熱を抑えるため）。
      */
-    fun detect(jpeg: ByteArray, rotationDegrees: Int): List<DetectedTarget> {
+    fun detect(jpeg: ByteArray, rotationDegrees: Int, allOrientations: Boolean = true): List<DetectedTarget> {
         val sensorImage = decode(jpeg) ?: return emptyList()
         try {
             val found = mutableListOf<DetectedTarget>()
-            for ((index, rotation) in TargetTracker.detectionRotations(rotationDegrees).withIndex()) {
+            val rotations = TargetTracker.detectionRotations(rotationDegrees).let { if (allOrientations) it else it.take(1) }
+            for ((index, rotation) in rotations.withIndex()) {
                 // 正立の向きで人が見つかれば、ほかの向きは探さない（検出の回数を抑える）。
                 if (index > 0 && found.any { it.kind.isPerson }) break
                 val more = detectRotated(sensorImage, rotation, withHands = index == 0)
