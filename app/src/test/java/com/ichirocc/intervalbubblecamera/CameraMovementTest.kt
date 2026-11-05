@@ -44,4 +44,43 @@ class CameraMovementTest {
     fun `a close subject filling the frame is not phone movement when the sensor says the phone stayed still`() {
         assertFalse(CameraMovement.phoneMoved(rotationDegrees = 0.3, changedRatio = 0.7))
     }
+
+    private val flatFaceUp = floatArrayOf(0f, 0f, 9.8f)
+    private val standing = floatArrayOf(0f, 9.8f, 0f)
+
+    @Test
+    fun `tilt is the angle between two gravity directions`() {
+        assertEquals(0.0, CameraMovement.tiltDegrees(flatFaceUp, flatFaceUp), 0.05)
+        assertEquals(90.0, CameraMovement.tiltDegrees(flatFaceUp, standing), 0.05)
+    }
+
+    @Test
+    fun `a phone on its back or face is lying flat`() {
+        assertTrue(CameraMovement.isLyingFlat(flatFaceUp))
+        assertTrue(CameraMovement.isLyingFlat(floatArrayOf(0.5f, 0.5f, -9.7f)))
+        assertFalse(CameraMovement.isLyingFlat(standing))
+    }
+
+    @Test
+    fun `a person stepping over a flat phone without a gyroscope is not phone movement`() {
+        val motion = CameraMovement.judge(rotationDegrees = null, changedRatio = 0.8, tiltDegrees = 0.2, lyingFlat = true)
+        assertEquals(PhoneMotion.STILL, motion)
+        assertTrue(CameraMovement.closeSubject(motion, changedRatio = 0.8))
+    }
+
+    @Test
+    fun `tilting the phone counts as moving even without a gyroscope`() {
+        assertEquals(
+            PhoneMotion.MOVED,
+            CameraMovement.judge(rotationDegrees = null, changedRatio = 0.1, tiltDegrees = 5.0, lyingFlat = true),
+        )
+    }
+
+    @Test
+    fun `a large change is saved without detection only when the phone is known to be still`() {
+        assertTrue(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.35))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.1))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.UNKNOWN, changedRatio = 0.4))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.MOVED, changedRatio = 0.9))
+    }
 }

@@ -9,6 +9,7 @@ import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.graphics.SurfaceTexture
 import android.hardware.Sensor
 import android.hardware.SensorEvent
@@ -51,7 +52,9 @@ import com.ichirocc.intervalbubblecamera.CameraCandidate
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
+import com.ichirocc.intervalbubblecamera.DetectionLevel
 import com.ichirocc.intervalbubblecamera.DeviceProfile
+import com.ichirocc.intervalbubblecamera.HeatLevel
 import com.ichirocc.intervalbubblecamera.IntervalPolicy
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
@@ -61,10 +64,11 @@ import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionThreshold
 import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.NightModeSwitch
+import com.ichirocc.intervalbubblecamera.PhoneMotion
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
+import com.ichirocc.intervalbubblecamera.ThermalPolicy
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
@@ -76,8 +80,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -117,6 +121,26 @@ class IntervalCaptureService : LifecycleService() {
     @Volatile private var latestOrientationNanos = 0L
     private val orientationAtFrame = mutableMapOf<String, FloatArray>()
 
+    /** スマホの今の重力の向き（加速度 [x, y, z]）。ジャイロの無い端末でも傾きと平置きが分かる。 */
+    @Volatile private var latestGravity: FloatArray? = null
+    @Volatile private var latestGravityNanos = 0L
+    private val gravityAtFrame = mutableMapOf<String, FloatArray>()
+    private var gravityIsRaw = false
+    private val gravityListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val previous = latestGravity
+            latestGravity = if (gravityIsRaw && previous != null) {
+                // 重力センサーが無く加速度をそのまま使うときは、細かな揺れをならして重力だけを残す。
+                FloatArray(3) { previous[it] + GRAVITY_SMOOTHING * (event.values[it] - previous[it]) }
+            } else {
+                event.values.copyOf(3)
+            }
+            latestGravityNanos = event.timestamp
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
+
     /** この回の判定で「スマホが動いた」とみなしたカメラ。 */
     private val phoneMovedCameras = mutableSetOf<String>()
     private val rotationListener = object : SensorEventListener {
@@ -129,6 +153,14 @@ class IntervalCaptureService : LifecycleService() {
     }
     private var targetRotation = Surface.ROTATION_0
     private var captureJob: Job? = null
+
+    /** 動体があった回の保存。撮影は止めずに裏で保存し、次の保存はこれが終わるまで待つ。 */
+    private var saveJob: Job? = null
+    private val saveExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val saveDispatcher = saveExecutor.asCoroutineDispatcher()
+
+    /** カメラごとに、今ピントを合わせてある位置と合わせた時刻（つなぎ直したら消す）。 */
+    private val focusedAt = mutableMapOf<String, Pair<MotionCenter, Long>>()
     private var bubbleOverlay: BubbleOverlay? = null
     private var sessionGeneration = 0
     private var currentIntervalSeconds = IntervalPolicy.DEFAULT_SECONDS
@@ -138,7 +170,14 @@ class IntervalCaptureService : LifecycleService() {
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
     private val targetTrackers = mutableMapOf<String, TargetTracker>()
     private var targetDetector: TargetDetector? = null
-    private var targetDetectorTried = false
+    // 検出用のスレッドと main スレッドの両方から読み書きする。
+    @Volatile private var targetDetectorTried = false
+
+    /** 本体の温度の段階（1 周ごとに測り直す）。 */
+    private var heatLevel = HeatLevel.NORMAL
+
+    /** 直近に測れた温度の見込み（測れない・呼び出しが早すぎて NaN のときは前回の値を使う）。 */
+    private var lastHeadroom: Float? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private lateinit var orientationListener: OrientationEventListener
 
@@ -206,6 +245,7 @@ class IntervalCaptureService : LifecycleService() {
         motionThreshold = threshold
         motionReferences.clear()
         orientationAtFrame.clear()
+        gravityAtFrame.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
         sessionGeneration += 1
@@ -256,7 +296,7 @@ class IntervalCaptureService : LifecycleService() {
                                 startSensors()
                                 CaptureStateStore.markRunning(intervalSeconds, runningDetail(intervalSeconds))
                                 CaptureStateStore.updateCameraSummary(cameraSummary())
-                                if (targetDetectorTried) publishDetectorSummary()
+                                publishDetectorSummary()
                                 startCaptureLoop(generation)
                             }.onFailure { error -> failToStartCamera(error) }
                         },
@@ -370,6 +410,7 @@ class IntervalCaptureService : LifecycleService() {
 
     private fun bindGroup(provider: ProcessCameraProvider, keys: List<String>) {
         provider.unbindAll()
+        focusedAt.clear()
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
@@ -433,17 +474,37 @@ class IntervalCaptureService : LifecycleService() {
         } else {
             sensorManager.registerListener(rotationListener, rotation, SensorManager.SENSOR_DELAY_GAME)
         }
+        // 重力の向き。ジャイロの無い端末でも、傾きの変化と平らに置いているかが分かる。
+        val gravity = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        gravityIsRaw = gravity == null
+        val gravitySensor = gravity ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (gravitySensor == null) {
+            Log.w(TAG, "No gravity sensor")
+        } else {
+            sensorManager.registerListener(gravityListener, gravitySensor, SensorManager.SENSOR_DELAY_UI)
+        }
     }
 
     private fun stopSensors() {
         getSystemService(SensorManager::class.java)?.let {
             it.unregisterListener(lightListener)
             it.unregisterListener(rotationListener)
+            it.unregisterListener(gravityListener)
         }
+        latestGravity = null
+        latestGravityNanos = 0L
+        gravityAtFrame.clear()
         latestLux = null
         latestOrientation = null
         latestOrientationNanos = 0L
         orientationAtFrame.clear()
+    }
+
+    /** 今の重力の向き。センサーが無い、または値が古いときは null。 */
+    private fun currentGravity(): FloatArray? {
+        val gravity = latestGravity ?: return null
+        val age = SystemClock.elapsedRealtimeNanos() - latestGravityNanos
+        return if (age in 0..ORIENTATION_MAX_AGE_NANOS) gravity else null
     }
 
     /** 今のスマホの向き。センサーが無い、または値が古い（届かなくなった）ときは null。 */
@@ -498,11 +559,12 @@ class IntervalCaptureService : LifecycleService() {
         captureJob = lifecycleScope.launch {
             while (isActive && generation == sessionGeneration) {
                 refreshWakeLock()
+                updateHeatLevel()
                 val startedAt = SystemClock.elapsedRealtime()
                 val result = captureWithMotionCheck()
                 if (generation != sessionGeneration) break
                 when (result) {
-                    is PhotoResult.Saved -> CaptureStateStore.markPhotosSaved(result.fileNames)
+                    is PhotoResult.Motion -> saveInBackground(generation, result.shots)
                     is PhotoResult.Baseline -> CaptureStateStore.markMotionBaseline()
                     is PhotoResult.NoMotion -> CaptureStateStore.markNoMotion(result.changedRatio, result.phoneMoved)
 
@@ -514,7 +576,8 @@ class IntervalCaptureService : LifecycleService() {
                 }
 
                 val captureDuration = SystemClock.elapsedRealtime() - startedAt
-                delay(IntervalPolicy.delayAfterCapture(currentIntervalSeconds, captureDuration))
+                // 本体が熱いときは間隔を延ばし、撮影が長引いても 1 周ごとに必ず休んで冷ます。
+                delay(ThermalPolicy.delayAfterCapture(currentIntervalSeconds, captureDuration, heatLevel))
             }
         }
     }
@@ -543,15 +606,23 @@ class IntervalCaptureService : LifecycleService() {
             val rotation = orientationAtFrame[key]?.let { previous ->
                 orientation?.let { CameraMovement.rotationDegrees(previous, it) }
             }
-            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation) }
+            val gravity = currentGravity()
+            val tilt = gravityAtFrame[key]?.let { previous ->
+                gravity?.let { CameraMovement.tiltDegrees(previous, it) }
+            }
+            val lyingFlat = gravity?.let { CameraMovement.isLyingFlat(it) } ?: false
+            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation, tilt, lyingFlat) }
+            captured.image = null
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
                 captured = refocusAndRetake(key, center) ?: captured
+                captured.image = null
             }
             motionReferences[key] = captured.frame
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
+            if (gravity != null) gravityAtFrame[key] = gravity.copyOf() else gravityAtFrame.remove(key)
             shots[key] = captured
             judgements[key] = judgement
         }
@@ -564,13 +635,32 @@ class IntervalCaptureService : LifecycleService() {
                 decision.maxChangedRatio,
                 phoneMoved = phoneMovedCameras.isNotEmpty(),
             )
-            is CameraSetDecision.Motion -> withContext(Dispatchers.IO) {
+            is CameraSetDecision.Motion -> PhotoResult.Motion(shots.mapValues { it.value.jpeg to it.value.rotationDegrees })
+        }
+    }
+
+    /**
+     * 動体があった回の画像を裏で保存し、撮影はそのまま続ける（6 枚の書き込みを待たずに次の周へ進む）。
+     * 前の保存が終わっていなければ待つ（保存待ちの画像がたまってメモリが足りなくならないように）。
+     */
+    private suspend fun saveInBackground(generation: Int, shots: Map<String, Pair<ByteArray, Int>>) {
+        saveJob?.join()
+        saveJob = lifecycleScope.launch {
+            val result = withContext(saveDispatcher) {
                 runCatching { saveCameraSet(shots) }
-                    .getOrElse { error ->
-                        Log.w(TAG, "Unable to save motion photos", error)
-                        PhotoResult.Failed(error.message ?: "保存に失敗しました")
-                    }
+                    .onFailure { Log.w(TAG, "Unable to save motion photos", it) }
             }
+            if (generation != sessionGeneration) {
+                // 停止後に保存し終えた分も枚数には数える。
+                result.onSuccess { CaptureStateStore.markSavedAfterStop(it) }
+                return@launch
+            }
+            result.fold(
+                onSuccess = { CaptureStateStore.markPhotosSaved(it) },
+                onFailure = { error ->
+                    CaptureStateStore.markRecovering("保存に失敗しました: ${error.message ?: "不明なエラー"}")
+                },
+            )
         }
     }
 
@@ -585,31 +675,42 @@ class IntervalCaptureService : LifecycleService() {
         reference: LumaFrame,
         shot: InMemoryResult.Captured,
         phoneRotationDegrees: Double?,
+        phoneTiltDegrees: Double?,
+        lyingFlat: Boolean,
     ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         // 手持ちなどでスマホ自体が動いた回は、画面全体が変わって何でも動いたように見えるので、
         // 画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が写っていれば保存する。
         // 追跡中の位置も画面ごとずれるため、追跡はやり直す。
-        val phoneMoved = CameraMovement.phoneMoved(phoneRotationDegrees, pixelMotion.changedRatio)
+        val phoneMotion = CameraMovement.judge(phoneRotationDegrees, pixelMotion.changedRatio, phoneTiltDegrees, lyingFlat)
+        val phoneMoved = phoneMotion == PhoneMotion.MOVED
+        // スマホが止まっていて画面の大部分が変わったら、すぐ近くを人が覆った（スマホの上を人がまたいだなど）と
+        // みなし、人を検出できなくても保存する。真下や真横から見た人は検出できないことが多いため。
+        val closeSubject = CameraMovement.closeSubject(phoneMotion, pixelMotion.changedRatio)
         if (phoneMoved) {
-            Log.i(TAG, "Phone moved for $key (rotation=$phoneRotationDegrees, change=${pixelMotion.changedRatio})")
+            Log.i(
+                TAG,
+                "Phone moved for $key (rotation=$phoneRotationDegrees, tilt=$phoneTiltDegrees, change=${pixelMotion.changedRatio})",
+            )
             tracker.clear()
             phoneMovedCameras.add(key)
         }
         val withoutDetection = if (phoneMoved) pixelMotion.copy(motionDetected = false, center = null) else pixelMotion
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
-        if (powerManager.currentThermalStatus >= PowerManager.THERMAL_STATUS_SEVERE) {
-            Log.w(TAG, "Thermal status ${powerManager.currentThermalStatus}; skipping detection")
-            return withoutDetection
-        }
+        if (heatLevel.detection == DetectionLevel.NONE) return withoutDetection
+        // 正立以外の向きでも探すのは、温度が普通で、画像が変わった・追跡中の対象がいる・スマホが動いた回だけ
+        // （何も変わっていない回まで 4 回検出すると発熱が大きいため）。
+        val allOrientations = heatLevel.detection == DetectionLevel.ALL_ORIENTATIONS &&
+            (pixelMotion.motionDetected || phoneMoved || tracker.hasTracks)
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
         return withContext(detectionDispatcher) {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
-                val detections = detector.detect(shot.jpeg, shot.rotationDegrees)
+                val image = shot.image ?: return@runCatching null
+                val detections = detector.detect(image, shot.rotationDegrees, allOrientations)
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
@@ -628,7 +729,10 @@ class IntervalCaptureService : LifecycleService() {
                 TargetTracker.focusTarget(tracked)?.box
             }.fold(
                 onSuccess = { box ->
-                    if (box == null) {
+                    if (box == null && closeSubject) {
+                        Log.i(TAG, "Something close covered $key (change=${pixelMotion.changedRatio}); saving")
+                        pixelMotion
+                    } else if (box == null) {
                         pixelMotion.copy(motionDetected = false, center = null)
                     } else {
                         if (phoneMoved) Log.i(TAG, "Phone moved for $key but a person is in frame; saving")
@@ -644,9 +748,24 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private fun publishDetectorSummary() {
-        CaptureStateStore.updateDetectorSummary(
-            "${deviceProfile.label}向け設定・" + (targetDetector?.summary ?: "検出なし（画像の変化だけで判定）"),
-        )
+        val detector = when {
+            !targetDetectorTried -> null
+            else -> "${deviceProfile.label}向け設定・" + (targetDetector?.summary ?: "検出なし（画像の変化だけで判定）")
+        }
+        CaptureStateStore.updateDetectorSummary(listOfNotNull(detector, ThermalPolicy.summary(heatLevel)).joinToString("\n"))
+    }
+
+    /** 本体の温度を測り直し、段階が変わったら画面の表示も変える。 */
+    private fun updateHeatLevel() {
+        val headroom = runCatching { powerManager.getThermalHeadroom(HEADROOM_FORECAST_SECONDS) }
+            .getOrNull()
+            ?.takeUnless { it.isNaN() }
+        if (headroom != null) lastHeadroom = headroom
+        val level = ThermalPolicy.level(powerManager.currentThermalStatus, lastHeadroom)
+        if (level == heatLevel) return
+        Log.i(TAG, "Heat level ${heatLevel} -> $level (status=${powerManager.currentThermalStatus}, headroom=$lastHeadroom)")
+        heatLevel = level
+        publishDetectorSummary()
     }
 
     private fun loadTargetDetector(): TargetDetector? {
@@ -710,6 +829,8 @@ class IntervalCaptureService : LifecycleService() {
 
     /** 動いた位置にピントを合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
+        // すでにその位置にピントを合わせて撮った画像なら、撮り直しても同じなので撮り直さない。
+        if (focusedAt[key]?.first == center) return null
         if (!focusAt(key, center)) return null
         val capture = boundCaptures[key] ?: return null
         return captureToMemory(capture) as? InMemoryResult.Captured
@@ -720,6 +841,10 @@ class IntervalCaptureService : LifecycleService() {
      * そこが暗いと画面全体が白飛びするため）。合わせられなかったら false。
      */
     private suspend fun focusAt(key: String, center: MotionCenter): Boolean {
+        // つなぎ直していなければピントはその位置に固定されたままなので、合わせ直さない（撮影を速くする）。
+        val now = SystemClock.elapsedRealtime()
+        focusedAt[key]?.let { (point, at) -> if (point == center && now - at < FOCUS_REFRESH_MS) return true }
+        focusedAt.remove(key)
         val camera = boundCameras[key] ?: return false
         val capture = boundCaptures[key] ?: return false
         val action = runCatching {
@@ -732,11 +857,13 @@ class IntervalCaptureService : LifecycleService() {
         }.getOrNull() ?: return false
         if (!camera.cameraInfo.isFocusMeteringSupported(action)) return false
 
-        return withTimeoutOrNull(FOCUS_TIMEOUT_MS) {
+        val focused = withTimeoutOrNull(FOCUS_TIMEOUT_MS) {
             runCatching { camera.cameraControl.startFocusAndMetering(action).await() }
                 .onFailure { Log.w(TAG, "Focus failed for $key", it) }
                 .isSuccess
         } ?: false
+        if (focused) focusedAt[key] = center to now
+        return focused
     }
 
     private suspend fun <T> ListenableFuture<T>.await(): T = suspendCancellableCoroutine { continuation ->
@@ -765,11 +892,13 @@ class IntervalCaptureService : LifecycleService() {
                         val result = image.use {
                             val buffer = it.planes[0].buffer
                             val jpeg = ByteArray(buffer.remaining()).also { bytes -> buffer.get(bytes) }
-                            val frame = MotionFrameSampler.fromJpeg(jpeg)
-                            if (frame == null) {
+                            // 人の検出と動体検知で同じ縮小画像を使い、大きな JPEG の読み込みを 1 回で済ませる。
+                            val small = MotionFrameSampler.decode(jpeg, deviceProfile.detectSize)
+                            if (small == null) {
                                 InMemoryResult.Failed("画像を解析できませんでした")
                             } else {
-                                InMemoryResult.Captured(jpeg, it.imageInfo.rotationDegrees, frame)
+                                val frame = MotionFrameSampler.fromBitmap(small)
+                                InMemoryResult.Captured(jpeg, it.imageInfo.rotationDegrees, frame, small)
                             }
                         }
                         if (continuation.isActive) continuation.resume(result)
@@ -785,12 +914,11 @@ class IntervalCaptureService : LifecycleService() {
             )
         }
 
-    private fun saveCameraSet(shots: Map<String, InMemoryResult.Captured>): PhotoResult {
-        val stamp = FILE_DATE_FORMAT.format(Date())
-        val fileNames = shots.map { (lens, shot) ->
-            "IBC_MOTION_${stamp}_$lens.jpg".also { saveJpeg(shot.jpeg, shot.rotationDegrees, it) }
+    private fun saveCameraSet(shots: Map<String, Pair<ByteArray, Int>>): List<String> {
+        val stamp = FILE_DATE_FORMAT.format(LocalDateTime.now())
+        return shots.map { (lens, shot) ->
+            "IBC_MOTION_${stamp}_$lens.jpg".also { saveJpeg(shot.first, shot.second, it) }
         }
-        return PhotoResult.Saved(fileNames)
     }
 
     private fun saveJpeg(jpeg: ByteArray, rotationDegrees: Int, fileName: String) {
@@ -976,6 +1104,8 @@ class IntervalCaptureService : LifecycleService() {
         releaseWakeLock()
         bubbleOverlay?.hide()
         captureExecutor.shutdown()
+        // 保存中の画像は書き終えてから止める（shutdown は実行中・待ち中の保存を最後まで行う）。
+        saveExecutor.shutdown()
         val detector = targetDetector
         targetDetector = null
         detectionExecutor.execute { detector?.close() }
@@ -987,7 +1117,8 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private sealed interface PhotoResult {
-        data class Saved(val fileNames: List<String>) : PhotoResult
+        /** 動体あり。カメラごとの JPEG と回転角を保存する。 */
+        class Motion(val shots: Map<String, Pair<ByteArray, Int>>) : PhotoResult
         data class Failed(val message: String) : PhotoResult
         data object Baseline : PhotoResult
         data class NoMotion(val changedRatio: Double, val phoneMoved: Boolean) : PhotoResult
@@ -1003,7 +1134,13 @@ class IntervalCaptureService : LifecycleService() {
     )
 
     private sealed interface InMemoryResult {
-        class Captured(val jpeg: ByteArray, val rotationDegrees: Int, val frame: LumaFrame) : InMemoryResult
+        class Captured(
+            val jpeg: ByteArray,
+            val rotationDegrees: Int,
+            val frame: LumaFrame,
+            /** 人の検出用の縮小画像（センサーの向き）。判定が済んだら手放す。 */
+            var image: Bitmap?,
+        ) : InMemoryResult
         data class Failed(val message: String) : InMemoryResult
     }
 
@@ -1025,12 +1162,19 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** 何秒先の温度の見込みで負荷を下げるか。 */
+        private const val HEADROOM_FORECAST_SECONDS = 10
         /** これより古い向きのセンサーの値は使わない（画面オフなどで届かなくなったとき）。 */
         private const val ORIENTATION_MAX_AGE_NANOS = 1_000_000_000L
+        /** 加速度から重力を取り出すときのならし具合（小さいほど強くならす）。 */
+        private const val GRAVITY_SMOOTHING = 0.1f
         // 夜景モードは 1 枚に数秒かかるため長めに待つ。
         private const val CAPTURE_TIMEOUT_MS = 15_000L
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
         private const val WAKE_LOCK_TIMEOUT_MS = 10 * 60 * 1_000L
-        private val FILE_DATE_FORMAT = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+        // DateTimeFormatter はスレッドをまたいで使っても安全（SimpleDateFormat は安全でない）。
+        private val FILE_DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS", Locale.US)
+        /** 同じ位置にピントを合わせたままでも、これだけ経ったら合わせ直す。 */
+        private const val FOCUS_REFRESH_MS = 30_000L
     }
 }
