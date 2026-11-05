@@ -16,6 +16,11 @@ enum class DeviceProfile(
     val jpegQuality: Int,
     /** カメラを切り替えた直後、露出が落ち着くまで待つ時間。 */
     val switchSettleMs: Long,
+    /**
+     * センサーの全画素で撮るか（Pixel 10 Pro XL の 5000 万画素など。ふだんは 4 画素を 1 つにまとめた
+     * 1250 万画素で撮られる）。1 枚が大きくなるので、メモリと処理に余裕のある機種だけ。
+     */
+    val fullResolution: Boolean,
 ) {
     FLAGSHIP(
         label = "Pixel 10 Pro XL",
@@ -26,6 +31,7 @@ enum class DeviceProfile(
         maxPoses = 5,
         jpegQuality = 95,
         switchSettleMs = 500L,
+        fullResolution = true,
     ),
     STANDARD(
         label = "OPPO A5 5G",
@@ -36,6 +42,7 @@ enum class DeviceProfile(
         maxPoses = 3,
         jpegQuality = 90,
         switchSettleMs = 800L,
+        fullResolution = false,
     ),
     ;
 

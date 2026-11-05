@@ -16,6 +16,7 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -26,6 +27,7 @@ import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraInfo
@@ -36,6 +38,8 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.core.SurfaceOrientedMeteringPointFactory
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.ExtensionMode
 import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -50,6 +54,8 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
 import com.ichirocc.intervalbubblecamera.CameraMovement
 import com.ichirocc.intervalbubblecamera.CameraCandidate
+import com.ichirocc.intervalbubblecamera.CameraFeatures
+import com.ichirocc.intervalbubblecamera.CapturePolicy
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
@@ -207,6 +213,16 @@ class IntervalCaptureService : LifecycleService() {
     /** 直近 2 秒の回転の速さ（撮影中の手ぶれを見積もる）。センサーのイベントも読み出しも main スレッド。 */
     private val gyroHistory = GyroHistory()
 
+    /** カメラごとの、撮影の質を上げる機能（光学式手ぶれ補正など）。 */
+    private val cameraFeatures = mutableMapOf<String, CameraFeatures>()
+
+    /** 全画素・質を上げる設定でつなげなかった・撮れなかったカメラ（以後はふつうの撮り方で撮る）。 */
+    private val fallbackCameras = mutableSetOf<String>()
+
+    /** 今つながっているカメラを、全画素で・質を上げる設定でつないだか。 */
+    private var boundFullResolution = false
+    private var boundEnhanced = false
+
     /** カメラごとの 焦点距離 ÷ センサーの幅（手ぶれで像がどれだけ流れるかの計算に使う）。 */
     private val focalOverSensorWidth = mutableMapOf<String, Double>()
 
@@ -292,6 +308,7 @@ class IntervalCaptureService : LifecycleService() {
         gravityAtFrame.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
@@ -440,6 +457,17 @@ class IntervalCaptureService : LifecycleService() {
         val capabilities = camera2.getCameraCharacteristic(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES)
         val focalLengths = camera2.getCameraCharacteristic(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
         val sensorSize = camera2.getCameraCharacteristic(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        cameraFeatures[key] = CameraFeatures(
+            opticalStabilization = camera2.getCameraCharacteristic(
+                CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION,
+            )?.contains(CameraCharacteristics.LENS_OPTICAL_STABILIZATION_MODE_ON) == true,
+            highQualityNoiseReduction = camera2.getCameraCharacteristic(
+                CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES,
+            )?.contains(CameraCharacteristics.NOISE_REDUCTION_MODE_HIGH_QUALITY) == true,
+            highQualityEdge = camera2.getCameraCharacteristic(
+                CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES,
+            )?.contains(CameraCharacteristics.EDGE_MODE_HIGH_QUALITY) == true,
+        )
         val focal = focalLengths?.firstOrNull()
         if (focal != null && sensorSize != null && sensorSize.width > 0f) {
             focalOverSensorWidth[key] = focal.toDouble() / sensorSize.width
@@ -464,8 +492,30 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
-        val captures = keys.associateWith { newImageCapture() }
         val night = wantsNight(keys)
+        val fullResolution = wantsFullResolution(keys)
+        val enhanced = wantsEnhanced(keys)
+        try {
+            bindCaptures(provider, keys, entries, night, fullResolution, enhanced)
+        } catch (error: RuntimeException) {
+            if (!fullResolution && !enhanced) throw error
+            // 全画素・質を上げる設定ではつなげなかった。このカメラはふつうの撮り方に戻す。
+            Log.w(TAG, "Unable to bind $keys with full resolution / enhanced capture; falling back", error)
+            fallbackCameras.addAll(keys)
+            provider.unbindAll()
+            bindCaptures(provider, keys, entries, night, fullResolution = false, enhanced = false)
+        }
+    }
+
+    private fun bindCaptures(
+        provider: ProcessCameraProvider,
+        keys: List<String>,
+        entries: List<CameraEntry>,
+        night: Boolean,
+        fullResolution: Boolean,
+        enhanced: Boolean,
+    ) {
+        val captures = keys.associateWith { newImageCapture(it, fullResolution, enhanced) }
         val cameras = when {
             night -> {
                 // 夜景モードは露出を合わせるために映像の流れが要るので、画面に出さないプレビューも一緒につなぐ。
@@ -487,7 +537,16 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = captures
         boundCameras = keys.zip(cameras).toMap()
         boundNight = night
+        boundFullResolution = fullResolution
+        boundEnhanced = enhanced
+        if (fullResolution || enhanced) Log.i(TAG, "Bound $keys (full resolution=$fullResolution, enhanced=$enhanced)")
     }
+
+    private fun wantsFullResolution(keys: List<String>): Boolean =
+        CapturePolicy.useFullResolution(deviceProfile, heatLevel, wantsNight(keys), keys.any { it in fallbackCameras })
+
+    private fun wantsEnhanced(keys: List<String>): Boolean =
+        CapturePolicy.useEnhancedCapture(wantsNight(keys), keys.any { it in fallbackCameras })
 
     private fun wantsNight(keys: List<String>): Boolean =
         nightModeSwitch.night && keys.size == 1 && cameraEntries.first { it.key == keys.single() }.nightSelector != null
@@ -591,12 +650,48 @@ class IntervalCaptureService : LifecycleService() {
         CaptureStateStore.updateCameraSummary(cameraSummary())
     }
 
-    private fun newImageCapture(): ImageCapture = ImageCapture.Builder()
-        .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
-        .setJpegQuality(deviceProfile.jpegQuality)
-        .setFlashMode(ImageCapture.FLASH_MODE_OFF)
-        .setTargetRotation(targetRotation)
-        .build()
+    /**
+     * カメラ [key] の撮影の設定。
+     * - [fullResolution]: センサーの全画素で撮る（高画素のセンサーは、ふだん 4 画素を 1 つにまとめて撮られる）。
+     * - [enhanced]: 遅れの少ない撮影（ZSL。カメラが流し続けている映像から、撮った瞬間の 1 枚を取り出すので
+     *   シャッターの遅れがほぼ無い。対応していないカメラではふつうの撮影になる）と、そのカメラが対応していれば
+     *   光学式手ぶれ補正・高品質のノイズ除去・高品質の輪郭の処理。
+     */
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean): ImageCapture {
+        val builder = ImageCapture.Builder()
+            .setCaptureMode(
+                if (enhanced) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
+            )
+            .setJpegQuality(deviceProfile.jpegQuality)
+            .setFlashMode(ImageCapture.FLASH_MODE_OFF)
+            .setTargetRotation(targetRotation)
+        if (fullResolution) {
+            builder.setResolutionSelector(
+                ResolutionSelector.Builder()
+                    .setAllowedResolutionMode(ResolutionSelector.PREFER_HIGHER_RESOLUTION_OVER_CAPTURE_RATE)
+                    .setResolutionStrategy(ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY)
+                    .build(),
+            )
+        }
+        val features = cameraFeatures[key]
+        if (enhanced && features != null) {
+            val extender = Camera2Interop.Extender(builder)
+            if (features.opticalStabilization) {
+                extender.setCaptureRequestOption(
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
+                    CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE_ON,
+                )
+            }
+            if (features.highQualityNoiseReduction) {
+                extender.setCaptureRequestOption(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY)
+            }
+            if (features.highQualityEdge) {
+                extender.setCaptureRequestOption(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY)
+            }
+        }
+        return builder.build()
+    }
 
     private fun cameraSummary(): String {
         val nightCameras = cameraEntries.filter { it.nightSelector != null }.map { it.key }
@@ -991,7 +1086,13 @@ class IntervalCaptureService : LifecycleService() {
                         // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
                         Log.w(TAG, "Retrying camera $key after: ${(first as InMemoryResult.Failed).message}")
                         delay(deviceProfile.switchSettleMs)
-                        captureToMemory(captures.getValue(key))
+                        val second = captureToMemory(captures.getValue(key))
+                        if (second is InMemoryResult.Failed && (boundFullResolution || boundEnhanced)) {
+                            // 全画素・質を上げる設定では撮れないカメラ。次からはふつうの撮り方でつなぐ。
+                            Log.w(TAG, "Camera $key failed twice with full resolution / enhanced capture; falling back")
+                            fallbackCameras.add(key)
+                        }
+                        second
                     }
                 }.map { (key, pending) -> key to pending.await() }
             }
@@ -1044,7 +1145,8 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     private fun isBound(group: List<String>): Boolean =
-        group.toSet() == boundCaptures.keys && boundNight == wantsNight(group)
+        group.toSet() == boundCaptures.keys && boundNight == wantsNight(group) &&
+            boundFullResolution == wantsFullResolution(group) && boundEnhanced == wantsEnhanced(group)
 
     /** 動いた位置にピントを合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
@@ -1258,6 +1360,7 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()
@@ -1278,6 +1381,7 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
+        fallbackCameras.clear()
         targetTrackers.clear()
         orientationListener.disable()
         stopSensors()

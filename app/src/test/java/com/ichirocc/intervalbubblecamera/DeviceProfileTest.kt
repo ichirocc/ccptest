@@ -26,4 +26,10 @@ class DeviceProfileTest {
         DeviceProfile.entries.forEach { assertEquals("CPU", it.delegates.last()) }
         assertTrue(DeviceProfile.FLAGSHIP.detectSize > DeviceProfile.STANDARD.detectSize)
     }
+
+    @Test
+    fun `only the flagship captures with every pixel`() {
+        assertTrue(DeviceProfile.FLAGSHIP.fullResolution)
+        assertTrue(!DeviceProfile.STANDARD.fullResolution)
+    }
 }
