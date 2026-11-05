@@ -70,6 +70,7 @@ import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.PhoneMotion
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
+import com.ichirocc.intervalbubblecamera.WalkingDetector
 import com.ichirocc.intervalbubblecamera.ThermalPolicy
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Job
@@ -128,6 +129,16 @@ class IntervalCaptureService : LifecycleService() {
     @Volatile private var latestGravity: FloatArray? = null
     @Volatile private var latestGravityNanos = 0L
     private val gravityAtFrame = mutableMapOf<String, FloatArray>()
+
+    /** 撮影している人が歩いているか（加速度の揺れから）。センサーのイベントも判定も main スレッド。 */
+    private val walkingDetector = WalkingDetector()
+    private val walkListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            walkingDetector.add(event.timestamp, event.values[0], event.values[1], event.values[2])
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
     private var gravityIsRaw = false
     private val gravityListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
@@ -486,6 +497,10 @@ class IntervalCaptureService : LifecycleService() {
         } else {
             sensorManager.registerListener(gravityListener, gravitySensor, SensorManager.SENSOR_DELAY_UI)
         }
+        // 撮影している人が歩いているかを見る（1 歩ごとの揺れを拾えるよう、毎秒 50 回ほど受け取る）。
+        sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
+            sensorManager.registerListener(walkListener, it, SensorManager.SENSOR_DELAY_GAME)
+        } ?: Log.w(TAG, "No accelerometer; walking is not detected")
     }
 
     private fun stopSensors() {
@@ -493,8 +508,10 @@ class IntervalCaptureService : LifecycleService() {
             it.unregisterListener(lightListener)
             it.unregisterListener(rotationListener)
             it.unregisterListener(gravityListener)
+            it.unregisterListener(walkListener)
         }
         latestGravity = null
+        walkingDetector.clear()
         latestGravityNanos = 0L
         gravityAtFrame.clear()
         latestLux = null
@@ -614,7 +631,10 @@ class IntervalCaptureService : LifecycleService() {
                 gravity?.let { CameraMovement.tiltDegrees(previous, it) }
             }
             val lyingFlat = gravity?.let { CameraMovement.isLyingFlat(it) } ?: false
-            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation, tilt, lyingFlat) }
+            val holderWalking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
+            val judgement = motionReferences[key]?.let {
+                judgeMotion(key, it, captured, rotation, tilt, lyingFlat, holderWalking)
+            }
             captured.image = null
             val center = judgement?.center
             if (center != null) {
@@ -680,10 +700,19 @@ class IntervalCaptureService : LifecycleService() {
         phoneRotationDegrees: Double?,
         phoneTiltDegrees: Double?,
         lyingFlat: Boolean,
+        holderWalking: Boolean,
     ): MotionResult {
         val rawMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
+        // スマホが動いていて、撮影している人も歩いている（体ごと動いている）回は、写っているものに関係なく保存する。
+        // 歩きながらの撮影では景色ごと変わり、重ね直しも人の検出も当てにならないため。
+        val walkingShot = holderWalking && phoneMotion == PhoneMotion.MOVED
+        fun finish(result: MotionResult): MotionResult {
+            if (!walkingShot || result.motionDetected) return result
+            Log.i(TAG, "Phone and its holder are moving for $key; saving")
+            return result.copy(motionDetected = true)
+        }
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
         val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
@@ -711,14 +740,14 @@ class IntervalCaptureService : LifecycleService() {
         val withoutDetection = if (phoneMoved) pixelMotion.copy(motionDetected = false, center = null) else pixelMotion
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
-        if (heatLevel.detection == DetectionLevel.NONE) return withoutDetection
+        if (heatLevel.detection == DetectionLevel.NONE) return finish(withoutDetection)
         // 正立以外の向きでも探すのは、温度が普通で、画像が変わった・追跡中の対象がいる・スマホが動いた回だけ
         // （何も変わっていない回まで 4 回検出すると発熱が大きいため）。
         val allOrientations = heatLevel.detection == DetectionLevel.ALL_ORIENTATIONS &&
             (pixelMotion.motionDetected || phoneMoved || tracker.hasTracks)
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
-        return withContext(detectionDispatcher) {
+        return finish(withContext(detectionDispatcher) {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
                 val image = shot.image ?: return@runCatching null
@@ -759,7 +788,7 @@ class IntervalCaptureService : LifecycleService() {
                     withoutDetection
                 },
             )
-        }
+        })
     }
 
     /** スマホの動きを打ち消した比べ方の結果。 */
