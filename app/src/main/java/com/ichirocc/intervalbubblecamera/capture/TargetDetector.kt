@@ -2,7 +2,10 @@ package com.ichirocc.intervalbubblecamera.capture
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
 import android.graphics.Matrix
+import android.graphics.Rect
 import android.util.Log
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.framework.image.MPImage
@@ -50,11 +53,66 @@ class TargetDetector private constructor(
         val rotations = TargetTracker.detectionRotations(rotationDegrees).let { if (allOrientations) it else it.take(1) }
         for ((index, rotation) in rotations.withIndex()) {
             // 正立の向きで人が見つかれば、ほかの向きは探さない（検出の回数を抑える）。
-            if (index > 0 && found.any { it.kind.isPerson }) break
-            val more = detectRotated(sensorImage, rotation, withHands = index == 0)
-            found += TargetTracker.newInOtherOrientation(found, more)
+            if (index > 0 && found.any { it.kind.isPerson && it.confident }) break
+            found += detectRotated(sensorImage, rotation, withHands = index == 0)
         }
-        return found
+        // 向きごとに少しずつずれて見つけた同じ対象は、捨てずに確からしさで重みをつけて 1 つにまとめる。
+        return TargetTracker.fuse(found)
+    }
+
+    /**
+     * 撮影した JPEG（大きいまま）から [region]（センサーの向きの正規化座標）だけを、長辺が [longSide]
+     * 前後になる高い解像度で切り出して検出し、画像全体の座標で返す。SAHI（Akyon et al., "Slicing Aided
+     * Hyper Inference and Fine-tuning for Small Object Detection", ICIP 2022）にならい、画面全体を縮小した
+     * 画像では小さすぎて見つからない遠くの人を、変化した辺りを拡大して見つける。
+     */
+    fun detectRegion(
+        jpeg: ByteArray,
+        region: NormalizedBox,
+        rotationDegrees: Int,
+        longSide: Int,
+        allOrientations: Boolean,
+    ): List<DetectedTarget> {
+        val decoder = runCatching { BitmapRegionDecoder.newInstance(jpeg, 0, jpeg.size) }
+            .onFailure { Log.w(TAG, "Unable to open the photo for zoomed detection", it) }
+            .getOrNull() ?: return emptyList()
+        try {
+            val width = decoder.width
+            val height = decoder.height
+            val rect = Rect(
+                (region.left * width).toInt().coerceIn(0, width),
+                (region.top * height).toInt().coerceIn(0, height),
+                Math.ceil(region.right * width).toInt().coerceIn(0, width),
+                Math.ceil(region.bottom * height).toInt().coerceIn(0, height),
+            )
+            if (rect.width() <= 1 || rect.height() <= 1) return emptyList()
+            var sampleSize = 1
+            while (maxOf(rect.width(), rect.height()) / (sampleSize * 2) >= longSide) sampleSize *= 2
+            val crop = runCatching {
+                decoder.decodeRegion(rect, BitmapFactory.Options().apply { inSampleSize = sampleSize })
+            }.getOrNull() ?: return emptyList()
+            try {
+                val left = rect.left.toDouble() / width
+                val top = rect.top.toDouble() / height
+                val scaleX = rect.width().toDouble() / width
+                val scaleY = rect.height().toDouble() / height
+                return detect(crop, rotationDegrees, allOrientations).map { found ->
+                    val box = found.box
+                    found.copy(
+                        box = NormalizedBox(
+                            left + box.left * scaleX,
+                            top + box.top * scaleY,
+                            left + box.right * scaleX,
+                            top + box.bottom * scaleY,
+                        ),
+                    )
+                }
+            } finally {
+                crop.recycle()
+            }
+        } finally {
+            decoder.recycle()
+        }
     }
 
     /** センサーの向きの画像を時計回りに [rotation] 度回して検出し、センサーの向きの座標に戻す。 */
@@ -64,7 +122,7 @@ class TargetDetector private constructor(
             val image = BitmapImageBuilder(rotated).build()
             val objects = detectObjects(image, rotated)
             // 物体検出で人の全身・大部分が見つかれば、その人の体の一部や手を探し直さない（検出の時間を減らす）。
-            val found = if (objects.any { it.kind == TargetKind.PERSON }) {
+            val found = if (objects.any { it.kind == TargetKind.PERSON && it.confident }) {
                 objects
             } else {
                 // 手の検出は手のひらの向きも推定するので、どの向きでも見つかる。1 回だけ行う。
@@ -89,7 +147,8 @@ class TargetDetector private constructor(
             .getOrDefault(emptyList())
             .map { detection ->
                 val box = detection.boundingBox()
-                val label = detection.categories().firstOrNull()?.categoryName()
+                val category = detection.categories().firstOrNull()
+                val label = category?.categoryName()
                 DetectedTarget(
                     NormalizedBox(
                         (box.left / bitmap.width).toDouble().coerceIn(0.0, 1.0),
@@ -98,6 +157,7 @@ class TargetDetector private constructor(
                         (box.bottom / bitmap.height).toDouble().coerceIn(0.0, 1.0),
                     ),
                     if (label == PERSON_LABEL) TargetKind.PERSON else TargetKind.VEHICLE,
+                    score = category?.score()?.toDouble() ?: 1.0,
                 )
             }
     }
@@ -161,8 +221,9 @@ class TargetDetector private constructor(
                     ObjectDetector.ObjectDetectorOptions.builder()
                         .setBaseOptions(baseOptions(profile.objectModel, delegate))
                         .setRunningMode(RunningMode.IMAGE)
-                        .setScoreThreshold(0.4f)
-                        .setMaxResults(10)
+                        // 低い確からしさの検出も受け取り、追跡中の対象の続きとしてだけ使う（ByteTrack）。
+                        .setScoreThreshold(TargetTracker.LOW_SCORE.toFloat())
+                        .setMaxResults(20)
                         .setCategoryAllowlist(TARGET_LABELS)
                         .build(),
                 )

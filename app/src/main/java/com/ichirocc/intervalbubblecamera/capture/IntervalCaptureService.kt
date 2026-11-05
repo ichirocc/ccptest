@@ -52,6 +52,7 @@ import com.ichirocc.intervalbubblecamera.CameraCandidate
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
+import com.ichirocc.intervalbubblecamera.DetectedTarget
 import com.ichirocc.intervalbubblecamera.DetectionLevel
 import com.ichirocc.intervalbubblecamera.DeviceProfile
 import com.ichirocc.intervalbubblecamera.HeatLevel
@@ -710,13 +711,16 @@ class IntervalCaptureService : LifecycleService() {
             val detector = loadTargetDetector() ?: return@withContext withoutDetection
             runCatching {
                 val image = shot.image ?: return@runCatching null
-                val detections = detector.detect(image, shot.rotationDegrees, allOrientations)
+                var detections = detector.detect(image, shot.rotationDegrees, allOrientations)
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
                     return@runCatching TargetTracker.personInFrame(detections)?.box
                 }
                 val mask = MovingTargets.changedMask(reference, shot.frame, motionThreshold)
+                if (pixelMotion.motionDetected) {
+                    detections = withZoomedDetections(detector, shot, mask, detections, allOrientations)
+                }
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
                 // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(detections) { box ->
@@ -745,6 +749,32 @@ class IntervalCaptureService : LifecycleService() {
                 },
             )
         }
+    }
+
+    /**
+     * 画面が変わったのに、その変化を説明する人（確からしい検出）が見つからなかったら、変化した辺りを
+     * 撮影画像から高い解像度で切り出して探し直し、見つけたものを [detections] とまとめて返す（SAHI）。
+     * 遠くの小さな人を見つけるため。検出が 1 回増えるので、変化があった回だけ行う。
+     */
+    private fun withZoomedDetections(
+        detector: TargetDetector,
+        shot: InMemoryResult.Captured,
+        mask: BooleanArray,
+        detections: List<DetectedTarget>,
+        allOrientations: Boolean,
+    ): List<DetectedTarget> {
+        val width = shot.frame.width
+        val height = shot.frame.height
+        val explained = detections.any {
+            it.kind.isPerson && it.confident &&
+                MovingTargets.shareOfChangeInside(mask, width, height, it.box) >= MovingTargets.MIN_SHARE_OF_CHANGE
+        }
+        if (explained) return detections
+        val region = MovingTargets.changedRegion(mask, width, height) ?: return detections
+        val zoomed = detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, deviceProfile.detectSize, allOrientations)
+        if (zoomed.isEmpty()) return detections
+        Log.i(TAG, "Zoomed detection found ${zoomed.size} target(s) in $region")
+        return TargetTracker.fuse(detections + zoomed)
     }
 
     private fun publishDetectorSummary() {
