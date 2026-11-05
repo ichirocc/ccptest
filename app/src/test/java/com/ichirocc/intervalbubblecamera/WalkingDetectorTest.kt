@@ -51,4 +51,20 @@ class WalkingDetectorTest {
         assertFalse(detector.isWalking(last + 1_500_000_000L))
         assertFalse(WalkingDetector().isWalking(0L))
     }
+
+    @Test
+    fun `a few irregular jolts are not walking`() {
+        val detector = WalkingDetector()
+        // 0.2 秒ほどの強い衝撃が、ばらばらの間隔で 3 回（段差・ぶつけた など）。
+        val last = detector.feed(3.0) { t -> if (t in 0.2..0.4 || t in 1.45..1.6 || t in 2.6..2.8) 14.0 else 9.8 }
+        assertFalse(detector.isWalking(last))
+    }
+
+    @Test
+    fun `a capture waits for a steady moment but not forever`() {
+        assertFalse(SteadyMoment.shouldCapture(angularSpeed = 1.5, waitedMs = 100))
+        assertTrue(SteadyMoment.shouldCapture(angularSpeed = 0.2, waitedMs = 100))
+        assertTrue(SteadyMoment.shouldCapture(angularSpeed = 1.5, waitedMs = SteadyMoment.MAX_WAIT_MS))
+        assertTrue(SteadyMoment.shouldCapture(angularSpeed = null, waitedMs = 0))
+    }
 }

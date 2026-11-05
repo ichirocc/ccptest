@@ -70,6 +70,7 @@ import com.ichirocc.intervalbubblecamera.NightModeSwitch
 import com.ichirocc.intervalbubblecamera.PhoneMotion
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
+import com.ichirocc.intervalbubblecamera.SteadyMoment
 import com.ichirocc.intervalbubblecamera.WalkingDetector
 import com.ichirocc.intervalbubblecamera.ThermalPolicy
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
@@ -132,6 +133,19 @@ class IntervalCaptureService : LifecycleService() {
 
     /** 撮影している人が歩いているか（加速度の揺れから）。センサーのイベントも判定も main スレッド。 */
     private val walkingDetector = WalkingDetector()
+    /** ジャイロで測った今の回転の速さ（rad/s）と受け取った時刻。歩きながらぶれの少ない瞬間を待つのに使う。 */
+    @Volatile private var latestAngularSpeed = 0.0
+    @Volatile private var latestAngularSpeedNanos = 0L
+    private val gyroListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val (x, y, z) = Triple(event.values[0], event.values[1], event.values[2])
+            latestAngularSpeed = Math.sqrt((x * x + y * y + z * z).toDouble())
+            latestAngularSpeedNanos = event.timestamp
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
+
     private val walkListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             walkingDetector.add(event.timestamp, event.values[0], event.values[1], event.values[2])
@@ -498,6 +512,10 @@ class IntervalCaptureService : LifecycleService() {
             sensorManager.registerListener(gravityListener, gravitySensor, SensorManager.SENSOR_DELAY_UI)
         }
         // 撮影している人が歩いているかを見る（1 歩ごとの揺れを拾えるよう、毎秒 50 回ほど受け取る）。
+        // 歩きながら撮るときに、スマホの揺れが止まった瞬間を待つ。
+        sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)?.let {
+            sensorManager.registerListener(gyroListener, it, SensorManager.SENSOR_DELAY_GAME)
+        }
         sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let {
             sensorManager.registerListener(walkListener, it, SensorManager.SENSOR_DELAY_GAME)
         } ?: Log.w(TAG, "No accelerometer; walking is not detected")
@@ -509,9 +527,11 @@ class IntervalCaptureService : LifecycleService() {
             it.unregisterListener(rotationListener)
             it.unregisterListener(gravityListener)
             it.unregisterListener(walkListener)
+            it.unregisterListener(gyroListener)
         }
         latestGravity = null
         walkingDetector.clear()
+        latestAngularSpeedNanos = 0L
         latestGravityNanos = 0L
         gravityAtFrame.clear()
         latestLux = null
@@ -892,6 +912,8 @@ class IntervalCaptureService : LifecycleService() {
                     key to async {
                         // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
                         focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
+                        // 歩きながらなら、1 歩ごとの揺れの合間（スマホがほぼ止まった瞬間）を待って撮る（ぶれを減らす）。
+                        if (walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())) waitForSteadyMoment()
                         val first = captureToMemory(captures.getValue(key))
                         if (first is InMemoryResult.Captured) return@async first
                         // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
@@ -903,6 +925,20 @@ class IntervalCaptureService : LifecycleService() {
             }
             taken.forEach { (key, shot) -> onShot(key, shot) }
         }
+    }
+
+    /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [SteadyMoment.MAX_WAIT_MS] 待つ。 */
+    private suspend fun waitForSteadyMoment() {
+        val started = SystemClock.elapsedRealtime()
+        while (!SteadyMoment.shouldCapture(currentAngularSpeed(), SystemClock.elapsedRealtime() - started)) {
+            delay(STEADY_POLL_MS)
+        }
+    }
+
+    /** 今の回転の速さ。ジャイロが無い、または値が古いときは null。 */
+    private fun currentAngularSpeed(): Double? {
+        val age = SystemClock.elapsedRealtimeNanos() - latestAngularSpeedNanos
+        return if (latestAngularSpeedNanos != 0L && age in 0..GYRO_MAX_AGE_NANOS) latestAngularSpeed else null
     }
 
     private fun isBound(group: List<String>): Boolean =
@@ -1243,6 +1279,9 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** ぶれの少ない瞬間を待つときに、回転の速さを見直す間隔。 */
+        private const val STEADY_POLL_MS = 15L
+        private const val GYRO_MAX_AGE_NANOS = 200_000_000L
         /** 何秒先の温度の見込みで負荷を下げるか。 */
         private const val HEADROOM_FORECAST_SECONDS = 10
         /** これより古い向きのセンサーの値は使わない（画面オフなどで届かなくなったとき）。 */
