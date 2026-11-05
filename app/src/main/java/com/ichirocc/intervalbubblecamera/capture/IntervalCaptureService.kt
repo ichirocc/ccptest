@@ -63,6 +63,7 @@ import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.MotionThreshold
 import com.ichirocc.intervalbubblecamera.MovingTargets
 import com.ichirocc.intervalbubblecamera.NightModeSwitch
+import com.ichirocc.intervalbubblecamera.PhoneMotion
 import com.ichirocc.intervalbubblecamera.R
 import com.ichirocc.intervalbubblecamera.TargetTracker
 import com.ichirocc.intervalbubblecamera.ThermalPolicy
@@ -119,6 +120,26 @@ class IntervalCaptureService : LifecycleService() {
     /** [latestOrientation] を受け取った時刻（SystemClock.elapsedRealtimeNanos 基準）。 */
     @Volatile private var latestOrientationNanos = 0L
     private val orientationAtFrame = mutableMapOf<String, FloatArray>()
+
+    /** スマホの今の重力の向き（加速度 [x, y, z]）。ジャイロの無い端末でも傾きと平置きが分かる。 */
+    @Volatile private var latestGravity: FloatArray? = null
+    @Volatile private var latestGravityNanos = 0L
+    private val gravityAtFrame = mutableMapOf<String, FloatArray>()
+    private var gravityIsRaw = false
+    private val gravityListener = object : SensorEventListener {
+        override fun onSensorChanged(event: SensorEvent) {
+            val previous = latestGravity
+            latestGravity = if (gravityIsRaw && previous != null) {
+                // 重力センサーが無く加速度をそのまま使うときは、細かな揺れをならして重力だけを残す。
+                FloatArray(3) { previous[it] + GRAVITY_SMOOTHING * (event.values[it] - previous[it]) }
+            } else {
+                event.values.copyOf(3)
+            }
+            latestGravityNanos = event.timestamp
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
+    }
 
     /** この回の判定で「スマホが動いた」とみなしたカメラ。 */
     private val phoneMovedCameras = mutableSetOf<String>()
@@ -215,6 +236,7 @@ class IntervalCaptureService : LifecycleService() {
         motionThreshold = threshold
         motionReferences.clear()
         orientationAtFrame.clear()
+        gravityAtFrame.clear()
         lastMotionCenters.clear()
         targetTrackers.clear()
         sessionGeneration += 1
@@ -442,17 +464,37 @@ class IntervalCaptureService : LifecycleService() {
         } else {
             sensorManager.registerListener(rotationListener, rotation, SensorManager.SENSOR_DELAY_GAME)
         }
+        // 重力の向き。ジャイロの無い端末でも、傾きの変化と平らに置いているかが分かる。
+        val gravity = sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+        gravityIsRaw = gravity == null
+        val gravitySensor = gravity ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        if (gravitySensor == null) {
+            Log.w(TAG, "No gravity sensor")
+        } else {
+            sensorManager.registerListener(gravityListener, gravitySensor, SensorManager.SENSOR_DELAY_UI)
+        }
     }
 
     private fun stopSensors() {
         getSystemService(SensorManager::class.java)?.let {
             it.unregisterListener(lightListener)
             it.unregisterListener(rotationListener)
+            it.unregisterListener(gravityListener)
         }
+        latestGravity = null
+        latestGravityNanos = 0L
+        gravityAtFrame.clear()
         latestLux = null
         latestOrientation = null
         latestOrientationNanos = 0L
         orientationAtFrame.clear()
+    }
+
+    /** 今の重力の向き。センサーが無い、または値が古いときは null。 */
+    private fun currentGravity(): FloatArray? {
+        val gravity = latestGravity ?: return null
+        val age = SystemClock.elapsedRealtimeNanos() - latestGravityNanos
+        return if (age in 0..ORIENTATION_MAX_AGE_NANOS) gravity else null
     }
 
     /** 今のスマホの向き。センサーが無い、または値が古い（届かなくなった）ときは null。 */
@@ -554,7 +596,12 @@ class IntervalCaptureService : LifecycleService() {
             val rotation = orientationAtFrame[key]?.let { previous ->
                 orientation?.let { CameraMovement.rotationDegrees(previous, it) }
             }
-            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation) }
+            val gravity = currentGravity()
+            val tilt = gravityAtFrame[key]?.let { previous ->
+                gravity?.let { CameraMovement.tiltDegrees(previous, it) }
+            }
+            val lyingFlat = gravity?.let { CameraMovement.isLyingFlat(it) } ?: false
+            val judgement = motionReferences[key]?.let { judgeMotion(key, it, captured, rotation, tilt, lyingFlat) }
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
@@ -563,6 +610,7 @@ class IntervalCaptureService : LifecycleService() {
             motionReferences[key] = captured.frame
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
+            if (gravity != null) gravityAtFrame[key] = gravity.copyOf() else gravityAtFrame.remove(key)
             shots[key] = captured
             judgements[key] = judgement
         }
@@ -596,15 +644,24 @@ class IntervalCaptureService : LifecycleService() {
         reference: LumaFrame,
         shot: InMemoryResult.Captured,
         phoneRotationDegrees: Double?,
+        phoneTiltDegrees: Double?,
+        lyingFlat: Boolean,
     ): MotionResult {
         val pixelMotion = MotionDetector.compare(reference, shot.frame, motionThreshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
         // 手持ちなどでスマホ自体が動いた回は、画面全体が変わって何でも動いたように見えるので、
         // 画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が写っていれば保存する。
         // 追跡中の位置も画面ごとずれるため、追跡はやり直す。
-        val phoneMoved = CameraMovement.phoneMoved(phoneRotationDegrees, pixelMotion.changedRatio)
+        val phoneMotion = CameraMovement.judge(phoneRotationDegrees, pixelMotion.changedRatio, phoneTiltDegrees, lyingFlat)
+        val phoneMoved = phoneMotion == PhoneMotion.MOVED
+        // スマホが止まっていて画面の大部分が変わったら、すぐ近くを人が覆った（スマホの上を人がまたいだなど）と
+        // みなし、人を検出できなくても保存する。真下や真横から見た人は検出できないことが多いため。
+        val closeSubject = CameraMovement.closeSubject(phoneMotion, pixelMotion.changedRatio)
         if (phoneMoved) {
-            Log.i(TAG, "Phone moved for $key (rotation=$phoneRotationDegrees, change=${pixelMotion.changedRatio})")
+            Log.i(
+                TAG,
+                "Phone moved for $key (rotation=$phoneRotationDegrees, tilt=$phoneTiltDegrees, change=${pixelMotion.changedRatio})",
+            )
             tracker.clear()
             phoneMovedCameras.add(key)
         }
@@ -640,7 +697,10 @@ class IntervalCaptureService : LifecycleService() {
                 TargetTracker.focusTarget(tracked)?.box
             }.fold(
                 onSuccess = { box ->
-                    if (box == null) {
+                    if (box == null && closeSubject) {
+                        Log.i(TAG, "Something close covered $key (change=${pixelMotion.changedRatio}); saving")
+                        pixelMotion
+                    } else if (box == null) {
                         pixelMotion.copy(motionDetected = false, center = null)
                     } else {
                         if (phoneMoved) Log.i(TAG, "Phone moved for $key but a person is in frame; saving")
@@ -1056,6 +1116,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val HEADROOM_FORECAST_SECONDS = 10
         /** これより古い向きのセンサーの値は使わない（画面オフなどで届かなくなったとき）。 */
         private const val ORIENTATION_MAX_AGE_NANOS = 1_000_000_000L
+        /** 加速度から重力を取り出すときのならし具合（小さいほど強くならす）。 */
+        private const val GRAVITY_SMOOTHING = 0.1f
         // 夜景モードは 1 枚に数秒かかるため長めに待つ。
         private const val CAPTURE_TIMEOUT_MS = 15_000L
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
