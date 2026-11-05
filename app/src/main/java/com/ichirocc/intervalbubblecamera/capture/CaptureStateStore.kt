@@ -65,13 +65,14 @@ object CaptureStateStore {
         )
     }
 
-    fun markNoMotion(changedRatio: Double) {
+    fun markNoMotion(changedRatio: Double, phoneMoved: Boolean = false) {
         val current = mutableState.value
         val skipped = current.skippedCount + 1
+        val reason = if (phoneMoved) "スマホが動いたため" else "動体なしのため"
         mutableState.value = current.copy(
             phase = CapturePhase.RUNNING,
             skippedCount = skipped,
-            detail = "動体なしのため保存を見送りました（変化${"%.1f".format(changedRatio * 100)}%・見送り${skipped}回）。",
+            detail = "${reason}保存を見送りました（変化${"%.1f".format(changedRatio * 100)}%・見送り${skipped}回）。",
         )
     }
 

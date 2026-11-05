@@ -22,8 +22,15 @@ object CameraMovement {
         return Math.toDegrees(2 * acos(min(1.0, dot)))
     }
 
-    /** [rotationDegrees] が null（センサー無し・前回の向き無し）なら画面の変化の割合だけで判定する。 */
+    /**
+     * 向きのセンサーで回転が測れたら、その角度だけで判定する（近くの人が画面の半分以上を占めても、
+     * スマホが止まっていれば動体として保存する）。[rotationDegrees] が null（センサー無し・前回の向き無し・
+     * センサーの値が古い）のときだけ、画面の変化の割合で判定する。
+     */
     fun phoneMoved(rotationDegrees: Double?, changedRatio: Double): Boolean =
-        (rotationDegrees != null && rotationDegrees >= MAX_ROTATION_DEGREES) ||
+        if (rotationDegrees != null) {
+            rotationDegrees >= MAX_ROTATION_DEGREES
+        } else {
             changedRatio >= MAX_SUBJECT_CHANGE_RATIO
+        }
 }

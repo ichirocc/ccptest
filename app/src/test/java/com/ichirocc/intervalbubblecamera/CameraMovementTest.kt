@@ -39,4 +39,9 @@ class CameraMovementTest {
         assertTrue(CameraMovement.phoneMoved(rotationDegrees = null, changedRatio = 0.7))
         assertFalse(CameraMovement.phoneMoved(rotationDegrees = null, changedRatio = 0.1))
     }
+
+    @Test
+    fun `a close subject filling the frame is not phone movement when the sensor says the phone stayed still`() {
+        assertFalse(CameraMovement.phoneMoved(rotationDegrees = 0.3, changedRatio = 0.7))
+    }
 }

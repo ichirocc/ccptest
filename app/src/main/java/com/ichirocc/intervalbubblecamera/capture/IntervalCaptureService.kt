@@ -112,10 +112,17 @@ class IntervalCaptureService : LifecycleService() {
 
     /** スマホの今の向き（単位クォータニオン [w, x, y, z]）。センサーが無ければ null。 */
     @Volatile private var latestOrientation: FloatArray? = null
+
+    /** [latestOrientation] を受け取った時刻（SystemClock.elapsedRealtimeNanos 基準）。 */
+    @Volatile private var latestOrientationNanos = 0L
     private val orientationAtFrame = mutableMapOf<String, FloatArray>()
+
+    /** この回の判定で「スマホが動いた」とみなしたカメラ。 */
+    private val phoneMovedCameras = mutableSetOf<String>()
     private val rotationListener = object : SensorEventListener {
         override fun onSensorChanged(event: SensorEvent) {
             latestOrientation = FloatArray(4).also { SensorManager.getQuaternionFromVector(it, event.values) }
+            latestOrientationNanos = event.timestamp
         }
 
         override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -417,10 +424,12 @@ class IntervalCaptureService : LifecycleService() {
             sensorManager.registerListener(lightListener, light, SensorManager.SENSOR_DELAY_NORMAL)
         }
         // 地磁気を使わない向きのセンサー（ジャイロ＋加速度）。手持ちのぶれを測る。
-        val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        // ジャイロの無い端末の向き（地磁気・加速度から計算）は止めていても数度ぶれ、毎回「スマホが動いた」と
+        // 判定して何も保存されなくなるため使わない。その場合は画像の変化だけで判定する。
+        val rotation = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+            ?.let { sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR) }
         if (rotation == null) {
-            Log.w(TAG, "No rotation sensor; phone movement is judged from the image only")
+            Log.w(TAG, "No gyroscope rotation sensor; phone movement is judged from the image only")
         } else {
             sensorManager.registerListener(rotationListener, rotation, SensorManager.SENSOR_DELAY_GAME)
         }
@@ -433,7 +442,15 @@ class IntervalCaptureService : LifecycleService() {
         }
         latestLux = null
         latestOrientation = null
+        latestOrientationNanos = 0L
         orientationAtFrame.clear()
+    }
+
+    /** 今のスマホの向き。センサーが無い、または値が古い（届かなくなった）ときは null。 */
+    private fun currentOrientation(): FloatArray? {
+        val orientation = latestOrientation ?: return null
+        val age = SystemClock.elapsedRealtimeNanos() - latestOrientationNanos
+        return if (age in 0..ORIENTATION_MAX_AGE_NANOS) orientation else null
     }
 
     /**
@@ -487,7 +504,7 @@ class IntervalCaptureService : LifecycleService() {
                 when (result) {
                     is PhotoResult.Saved -> CaptureStateStore.markPhotosSaved(result.fileNames)
                     is PhotoResult.Baseline -> CaptureStateStore.markMotionBaseline()
-                    is PhotoResult.NoMotion -> CaptureStateStore.markNoMotion(result.changedRatio)
+                    is PhotoResult.NoMotion -> CaptureStateStore.markNoMotion(result.changedRatio, result.phoneMoved)
 
                     is PhotoResult.Failed -> {
                         CaptureStateStore.markRecovering(
@@ -511,6 +528,7 @@ class IntervalCaptureService : LifecycleService() {
         val shots = linkedMapOf<String, InMemoryResult.Captured>()
         val judgements = linkedMapOf<String, MotionResult?>()
         var firstFailure: String? = null
+        phoneMovedCameras.clear()
 
         val failed = mutableListOf<String>()
         forEachCameraGroup { key, shot ->
@@ -521,7 +539,7 @@ class IntervalCaptureService : LifecycleService() {
                 return@forEachCameraGroup
             }
             var captured = shot as InMemoryResult.Captured
-            val orientation = latestOrientation
+            val orientation = currentOrientation()
             val rotation = orientationAtFrame[key]?.let { previous ->
                 orientation?.let { CameraMovement.rotationDegrees(previous, it) }
             }
@@ -532,7 +550,8 @@ class IntervalCaptureService : LifecycleService() {
                 captured = refocusAndRetake(key, center) ?: captured
             }
             motionReferences[key] = captured.frame
-            orientation?.let { orientationAtFrame[key] = it }
+            // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
+            if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
             shots[key] = captured
             judgements[key] = judgement
         }
@@ -541,7 +560,10 @@ class IntervalCaptureService : LifecycleService() {
 
         return when (val decision = CameraSetMotion.decide(judgements)) {
             CameraSetDecision.Baseline -> PhotoResult.Baseline
-            is CameraSetDecision.NoMotion -> PhotoResult.NoMotion(decision.maxChangedRatio)
+            is CameraSetDecision.NoMotion -> PhotoResult.NoMotion(
+                decision.maxChangedRatio,
+                phoneMoved = phoneMovedCameras.isNotEmpty(),
+            )
             is CameraSetDecision.Motion -> withContext(Dispatchers.IO) {
                 runCatching { saveCameraSet(shots) }
                     .getOrElse { error ->
@@ -570,6 +592,7 @@ class IntervalCaptureService : LifecycleService() {
         if (CameraMovement.phoneMoved(phoneRotationDegrees, pixelMotion.changedRatio)) {
             Log.i(TAG, "Phone moved for $key (rotation=$phoneRotationDegrees, change=${pixelMotion.changedRatio})")
             tracker.clear()
+            phoneMovedCameras.add(key)
             return pixelMotion.copy(motionDetected = false, center = null)
         }
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
@@ -958,7 +981,7 @@ class IntervalCaptureService : LifecycleService() {
         data class Saved(val fileNames: List<String>) : PhotoResult
         data class Failed(val message: String) : PhotoResult
         data object Baseline : PhotoResult
-        data class NoMotion(val changedRatio: Double) : PhotoResult
+        data class NoMotion(val changedRatio: Double, val phoneMoved: Boolean) : PhotoResult
     }
 
     private class CameraEntry(
@@ -993,6 +1016,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** これより古い向きのセンサーの値は使わない（画面オフなどで届かなくなったとき）。 */
+        private const val ORIENTATION_MAX_AGE_NANOS = 1_000_000_000L
         // 夜景モードは 1 枚に数秒かかるため長めに待つ。
         private const val CAPTURE_TIMEOUT_MS = 15_000L
         private val FRAME_CENTER = MotionCenter(0.5, 0.5)
