@@ -36,8 +36,15 @@ object NightMotion {
     private const val BIN_WIDTH = 32
     private const val MIN_BIN_PIXELS = 40
 
-    /** 雑音の標準偏差 [sigma]（1 枚ぶん）に対する、明るさの変化の閾値。 */
-    fun thresholdForNoise(sigma: Double): Int = ceil(NOISE_SIGMAS * sqrt(2.0) * sigma).toInt()
+    /**
+     * 雑音から決める閾値の上限。80×60 に縮めた画像の雑音はこれよりずっと小さいので、これを超えるのは
+     * 雑音ではなく見積もりの失敗（動いたものが多すぎた）。上げすぎて何も動体にならなくなるのを防ぐ。
+     */
+    const val MAX_NOISE_THRESHOLD = 60
+
+    /** 雑音の標準偏差 [sigma]（1 枚ぶん）に対する、明るさの変化の閾値（[MAX_NOISE_THRESHOLD] まで）。 */
+    fun thresholdForNoise(sigma: Double): Int =
+        min(MAX_NOISE_THRESHOLD.toDouble(), ceil(NOISE_SIGMAS * sqrt(2.0) * sigma)).toInt()
 
     fun meanLuma(frame: LumaFrame): Double = frame.pixels.average()
 
@@ -45,18 +52,26 @@ object NightMotion {
      * 前回 [previous] と今回 [current] の差から、雑音のモデル（ELD の分散 = a × 明るさ + b）を求める。
      * 明るさの区切りごとに、差の中央絶対偏差（MAD）から雑音の大きさを求め（動いた画素が半分未満なら
      * その影響を受けない）、区切りの明るさに対して直線を当てはめる。求められなければ null。
+     * スマホが動いた回は、画面全体のずれ [frameShift] を打ち消して重ねた画素どうしで比べる（ずれたまま
+     * 比べると、景色の模様の差まで雑音として数えてしまう）。
      */
-    fun estimateNoise(previous: LumaFrame, current: LumaFrame): NoiseModel? {
-        require(previous.pixels.size == current.pixels.size) { "frames must have the same size" }
+    fun estimateNoise(previous: LumaFrame, current: LumaFrame, frameShift: FrameShift = FrameShift.NONE): NoiseModel? {
+        require(previous.width == current.width && previous.height == current.height) { "frames must have the same size" }
+        val width = current.width
+        val height = current.height
         val n = current.pixels.size
         val shift = ((current.pixels.sum() - previous.pixels.sum()).toDouble() / n).roundToInt()
         val bins = 256 / BIN_WIDTH
         val diffs = Array(bins) { mutableListOf<Int>() }
         val lumaSums = DoubleArray(bins)
         for (i in 0 until n) {
-            val luma = (previous.pixels[i] + current.pixels[i]) / 2
+            val px = i % width - frameShift.dx
+            val py = i / width - frameShift.dy
+            if (px !in 0 until width || py !in 0 until height) continue
+            val before = previous.pixels[py * width + px]
+            val luma = (before + current.pixels[i]) / 2
             val bin = (luma / BIN_WIDTH).coerceIn(0, bins - 1)
-            diffs[bin].add(current.pixels[i] - previous.pixels[i] - shift)
+            diffs[bin].add(current.pixels[i] - before - shift)
             lumaSums[bin] += luma.toDouble()
         }
         val points = mutableListOf<Triple<Double, Double, Int>>() // (明るさ, 1 枚の分散, 画素の数)
@@ -95,9 +110,14 @@ object NightMotion {
      * その明るさの雑音の [NOISE_SIGMAS] 倍（2 枚の差なので √2 倍してから）以上の変化だけを数える。
      * ユーザーの設定より下げることはない。明るい場面ではそのまま。
      */
-    fun thresholdFor(previous: LumaFrame, current: LumaFrame, user: MotionThreshold): MotionThreshold {
+    fun thresholdFor(
+        previous: LumaFrame,
+        current: LumaFrame,
+        user: MotionThreshold,
+        frameShift: FrameShift = FrameShift.NONE,
+    ): MotionThreshold {
         if (min(meanLuma(previous), meanLuma(current)) >= DARK_MEAN) return user
-        val noise = estimateNoise(previous, current) ?: return user
+        val noise = estimateNoise(previous, current, frameShift) ?: return user
         return user.copy(noise = noise)
     }
 
@@ -177,7 +197,7 @@ object LowLightEnhancer {
 }
 
 /** ジャイロで測った回転の速さ（rad/s）の、直近の記録。 */
-class GyroHistory(private val keepNanos: Long = 2_000_000_000L) {
+class GyroHistory(private val keepNanos: Long = KEEP_NANOS) {
     private val times = ArrayDeque<Long>()
     private val speeds = ArrayDeque<Double>()
 
@@ -202,6 +222,14 @@ class GyroHistory(private val keepNanos: Long = 2_000_000_000L) {
     fun clear() {
         times.clear()
         speeds.clear()
+    }
+
+    companion object {
+        /**
+         * 覚えておく長さ。撮ってから手ぶれを見積もるまでに、人の検出（向きを変えて何回か・切り出して
+         * もう 1 回）が入るので、それより十分長くする（毎秒 50 回で 500 個）。
+         */
+        const val KEEP_NANOS = 10_000_000_000L
     }
 }
 
