@@ -29,7 +29,7 @@
             android:layout_marginTop="4dp"
             android:text="@string/screen_subtitle"
             android:textColor="@color/text_secondary"
-            android:textSize="13sp" />
+            android:textSize="14sp" />
 
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"
@@ -88,7 +88,7 @@
                     android:layout_marginTop="8dp"
                     android:text="@string/status_prompt"
                     android:textColor="@color/text_secondary"
-                    android:textSize="13sp" />
+                    android:textSize="14sp" />
 
                 <TextView
                     android:id="@+id/lastPhoto"
@@ -99,14 +99,23 @@
                     android:maxLines="1"
                     android:text="@string/last_photo_none"
                     android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="14sp" />
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/technicalToggleButton"
+                    style="@style/Widget.Material3.Button.TextButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="@string/technical_show" />
+
                 <TextView
                     android:id="@+id/cameraInfo"
+                    android:visibility="gone"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:textColor="@color/text_secondary"
-                    android:textSize="12sp" />
+                    android:textSize="14sp" />
 
                 <TextView
                     android:id="@+id/failedCameras"
@@ -114,7 +123,7 @@
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
                     android:textColor="@color/danger"
-                    android:textSize="12sp"
+                    android:textSize="14sp"
                     android:visibility="gone" />
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
@@ -182,7 +191,7 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="6dp"
                 android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
+                android:textSize="14sp" />
 
             <TextView
                 android:layout_width="match_parent"
@@ -190,7 +199,7 @@
                 android:layout_marginTop="6dp"
                 android:text="@string/preset_auto_note"
                 android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+                android:textSize="14sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/detailToggleButton"
@@ -415,7 +424,7 @@
                         android:layout_height="wrap_content"
                         android:text="@string/icon_color_description"
                         android:textColor="@color/text_primary"
-                        android:textSize="13sp" />
+                        android:textSize="14sp" />
 
                     <TextView
                         android:id="@+id/iconColorSelectedLabel"
@@ -424,7 +433,7 @@
                         android:layout_marginTop="2dp"
                         android:text="@string/icon_color_blue"
                         android:textColor="@color/icon_blue"
-                        android:textSize="13sp"
+                        android:textSize="14sp"
                         android:textStyle="bold" />
                 </LinearLayout>
             </LinearLayout>
@@ -561,7 +570,7 @@
                 android:layout_height="wrap_content"
                 android:text="@string/permission_missing"
                 android:textColor="@color/text_secondary"
-                android:textSize="13sp" />
+                android:textSize="14sp" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/overlayPermissionButton"
@@ -619,7 +628,7 @@
             android:padding="10dp"
             android:text="@string/usage_warning"
             android:textColor="@color/text_primary"
-            android:textSize="12sp" />
+            android:textSize="14sp" />
 
         <TextView
             android:layout_width="match_parent"

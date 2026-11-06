@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoCount: TextView
     private lateinit var lastPhoto: TextView
     private lateinit var cameraInfo: TextView
+    private lateinit var technicalToggleButton: MaterialButton
     private lateinit var failedCameras: TextView
     private lateinit var presetButtons: Map<CapturePreset, RadioButton>
     private lateinit var presetDescription: TextView
@@ -70,6 +71,9 @@ class MainActivity : AppCompatActivity() {
 
     /** 撮り方を選んだ結果としてスライダーを動かしている間は true（スライダー側から撮り方を選び直さない）。 */
     private var applyingPreset = false
+
+    /** くわしい情報（カメラ・検出・温度・撮れなかったカメラ）を見せているか。ふだんは閉じておく。 */
+    private var technicalVisible = false
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -144,6 +148,7 @@ class MainActivity : AppCompatActivity() {
         photoCount = findViewById(R.id.photoCount)
         lastPhoto = findViewById(R.id.lastPhoto)
         cameraInfo = findViewById(R.id.cameraInfo)
+        technicalToggleButton = findViewById(R.id.technicalToggleButton)
         failedCameras = findViewById(R.id.failedCameras)
         presetButtons = linkedMapOf(
             CapturePreset.STANDARD to findViewById(R.id.presetStandard),
@@ -243,6 +248,11 @@ class MainActivity : AppCompatActivity() {
             button.setOnClickListener { selectPreset(preset) }
         }
         detailToggleButton.setOnClickListener { setDetailsVisible(!detailSettings.isVisible) }
+        technicalToggleButton.setOnClickListener {
+            technicalVisible = !technicalVisible
+            technicalToggleButton.text = getString(if (technicalVisible) R.string.technical_hide else R.string.technical_show)
+            renderState(CaptureStateStore.state.value)
+        }
 
         iconColorButtons.forEach { (color, button) ->
             button.setOnClickListener { selectIconColor(color) }
@@ -299,9 +309,10 @@ class MainActivity : AppCompatActivity() {
             getString(R.string.last_photo_name, it)
         } ?: getString(R.string.last_photo_none)
         cameraInfo.text = listOfNotNull(state.cameraSummary, state.detectorSummary).joinToString("\n")
-        cameraInfo.isVisible = cameraInfo.text.isNotEmpty()
+        cameraInfo.isVisible = technicalVisible && cameraInfo.text.isNotEmpty()
+        technicalToggleButton.isVisible = cameraInfo.text.isNotEmpty() || state.failedCameras.isNotEmpty()
         failedCameras.text = getString(R.string.failed_cameras, state.failedCameras.joinToString())
-        failedCameras.isVisible = state.isActive && state.failedCameras.isNotEmpty()
+        failedCameras.isVisible = technicalVisible && state.isActive && state.failedCameras.isNotEmpty()
 
         val controlsEnabled = !state.isActive
         presetButtons.values.forEach { it.isEnabled = controlsEnabled }

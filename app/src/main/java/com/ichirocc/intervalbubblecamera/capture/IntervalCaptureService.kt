@@ -301,7 +301,7 @@ class IntervalCaptureService : LifecycleService() {
                 AppIconColor.fromStorageKey(intent.getStringExtra(EXTRA_ICON_COLOR)),
             )
 
-            ACTION_STOP -> stopCapture("撮影を停止しました。")
+            ACTION_STOP -> stopCapture("とるのを やめました。")
             else -> stopSelf(startId)
         }
 
@@ -316,7 +316,7 @@ class IntervalCaptureService : LifecycleService() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            CaptureStateStore.markCaptureError("カメラ権限がありません。アプリを開いて許可してください。")
+            CaptureStateStore.markCaptureError("カメラの 許可が ありません。アプリを ひらいて 許可してね。")
             stopSelf()
             return
         }
@@ -348,7 +348,7 @@ class IntervalCaptureService : LifecycleService() {
         } catch (error: RuntimeException) {
             Log.e(TAG, "Unable to enter camera foreground mode", error)
             CaptureStateStore.markCaptureError(
-                "撮影サービスを開始できませんでした。アプリを前面にして再試行してください。",
+                "とりはじめることが できませんでした。アプリを ひらいたまま、もういちど スタートしてね。",
             )
             stopSelf()
             return
@@ -356,7 +356,7 @@ class IntervalCaptureService : LifecycleService() {
 
         if (!showBubble()) {
             CaptureStateStore.markCaptureError(
-                "バブルを表示できませんでした。表示権限を確認してください。",
+                "バブルを 出せませんでした。「バブルを 出す」の 許可を たしかめてね。",
             )
             stopAfterFatalError()
             return
@@ -391,7 +391,7 @@ class IntervalCaptureService : LifecycleService() {
                 }.onFailure { error ->
                     Log.e(TAG, "Unable to initialize CameraX", error)
                     CaptureStateStore.markCaptureError(
-                        "カメラを開始できませんでした。別のアプリがカメラを使用していないか確認してください。",
+                        "カメラを 使えませんでした。ほかのアプリで カメラを 使っていないか、たしかめてね。",
                     )
                     stopAfterFatalError()
                 }
@@ -407,7 +407,7 @@ class IntervalCaptureService : LifecycleService() {
     private fun failToStartCamera(error: Throwable) {
         Log.e(TAG, "Unable to start cameras", error)
         CaptureStateStore.markCaptureError(
-            "カメラを開始できませんでした。別のアプリがカメラを使用していないか確認してください。",
+            "カメラを 使えませんでした。ほかのアプリで カメラを 使っていないか、たしかめてね。",
         )
         stopAfterFatalError()
     }
@@ -764,10 +764,10 @@ class IntervalCaptureService : LifecycleService() {
     private fun runningDetail(intervalSeconds: Int): String {
         val count = cameraEntries.size
         val how = when {
-            count == 1 -> "カメラ1台で撮影し"
-            else -> "カメラ${count}台を順に切り替えて撮影し"
+            count == 1 -> "カメラ1台で とって"
+            else -> "カメラ${count}台で じゅんばんに とって"
         }
-        return "${intervalSeconds}秒ごとに$how、どれかで動体があるときだけ全カメラの画像を保存します。"
+        return "${intervalSeconds}秒ごとに$how、動きが あったときだけ 写真を のこします。"
     }
 
     private fun startCaptureLoop(generation: Int) {
@@ -785,8 +785,10 @@ class IntervalCaptureService : LifecycleService() {
                     is PhotoResult.NoMotion -> CaptureStateStore.markNoMotion(result.changedRatio, result.phoneMoved)
 
                     is PhotoResult.Failed -> {
+                        Log.w(TAG, "Capture cycle failed: ${result.message}")
                         CaptureStateStore.markRecovering(
-                            "前回の撮影に失敗しました。次の間隔で再試行します: ${result.message}",
+                            // くわしい理由（result.message）は logcat に残し、画面には分かりやすく出す。
+                            "さっきは うまく とれませんでした。つぎに もういちど とります。",
                         )
                     }
                 }
@@ -881,7 +883,7 @@ class IntervalCaptureService : LifecycleService() {
             result.fold(
                 onSuccess = { CaptureStateStore.markPhotosSaved(it) },
                 onFailure = { error ->
-                    CaptureStateStore.markRecovering("保存に失敗しました: ${error.message ?: "不明なエラー"}")
+                    CaptureStateStore.markRecovering("写真を のこせませんでした。しまう場所が いっぱいでないか、たしかめてね。")
                 },
             )
         }
@@ -1566,7 +1568,7 @@ class IntervalCaptureService : LifecycleService() {
         detectionExecutor.execute { detector?.close() }
         detectionExecutor.shutdown()
         if (CaptureStateStore.state.value.isActive) {
-            CaptureStateStore.markStopped("撮影サービスが終了しました。")
+            CaptureStateStore.markStopped("とるのが おわりました。")
         }
         super.onDestroy()
     }
