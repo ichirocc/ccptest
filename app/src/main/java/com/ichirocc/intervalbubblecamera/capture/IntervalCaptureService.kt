@@ -15,8 +15,11 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -54,6 +57,10 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.ichirocc.intervalbubblecamera.AppIconColor
 import com.ichirocc.intervalbubblecamera.CameraMovement
 import com.ichirocc.intervalbubblecamera.CameraCandidate
+import com.ichirocc.intervalbubblecamera.CameraDetectionTuning
+import com.ichirocc.intervalbubblecamera.CameraSettling
+import com.ichirocc.intervalbubblecamera.ThreeAState
+import com.ichirocc.intervalbubblecamera.DetectionTuning
 import com.ichirocc.intervalbubblecamera.CameraFeatures
 import com.ichirocc.intervalbubblecamera.CapturePolicy
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
@@ -230,6 +237,15 @@ class IntervalCaptureService : LifecycleService() {
 
     /** カメラごとの 焦点距離 ÷ センサーの幅（手ぶれで像がどれだけ流れるかの計算に使う）。 */
     private val focalOverSensorWidth = mutableMapOf<String, Double>()
+
+    /**
+     * カメラごとの、つないでから届いた最新の露出・ホワイトバランス・ピントの状態。カメラのスレッドから書き、
+     * main スレッドで読む。つなぎ直したら消す（前のカメラの状態で「落ち着いた」と判断しないため）。
+     */
+    private val threeAStates = java.util.concurrent.ConcurrentHashMap<String, ThreeAState>()
+
+    /** カメラごとの人の検出の調整（画角で決める。[CameraDetectionTuning]）。 */
+    private val detectionTunings = mutableMapOf<String, DetectionTuning>()
 
     /** カメラごとに、続けて人の検出を省いた回数（[DetectionSkipping]）。 */
     private val skippedDetections = mutableMapOf<String, Int>()
@@ -485,6 +501,10 @@ class IntervalCaptureService : LifecycleService() {
         if (focal != null && sensorSize != null && sensorSize.width > 0f) {
             focalOverSensorWidth[key] = focal.toDouble() / sensorSize.width
         }
+        detectionTunings[key] = CameraDetectionTuning.forCamera(
+            focalOverSensorWidth[key],
+            front = info.lensFacing == CameraSelector.LENS_FACING_FRONT,
+        )
         return CameraCandidate(
             key = key,
             logicalKey = logicalKey,
@@ -528,7 +548,8 @@ class IntervalCaptureService : LifecycleService() {
         fullResolution: Boolean,
         enhanced: Boolean,
     ) {
-        val captures = keys.associateWith { newImageCapture(it, fullResolution, enhanced) }
+        keys.forEach { threeAStates.remove(it) }
+        val captures = keys.associateWith { newImageCapture(it, fullResolution, enhanced, reportState = !night) }
         val cameras = when {
             night -> {
                 // 夜景モードは露出を合わせるために映像の流れが要るので、画面に出さないプレビューも一緒につなぐ。
@@ -672,7 +693,7 @@ class IntervalCaptureService : LifecycleService() {
      *   ふつうの JPEG として読めて、対応した画面では明るい所がより明るく見える）でも撮る。
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean): ImageCapture {
+    private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean, reportState: Boolean): ImageCapture {
         val builder = ImageCapture.Builder()
             .setCaptureMode(
                 if (enhanced) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
@@ -689,6 +710,25 @@ class IntervalCaptureService : LifecycleService() {
             )
         }
         if (enhanced && key in ultraHdrCameras) builder.setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
+        if (reportState) {
+            // カメラが毎コマ知らせる露出・ホワイトバランス・ピントの状態を受け取る（切り替え直後に落ち着くのを待つ）。
+            // 夜景モード（メーカーのカメラ拡張）では受け取れないので付けない。
+            Camera2Interop.Extender(builder).setSessionCaptureCallback(
+                object : CameraCaptureSession.CaptureCallback() {
+                    override fun onCaptureCompleted(
+                        session: CameraCaptureSession,
+                        request: CaptureRequest,
+                        result: TotalCaptureResult,
+                    ) {
+                        threeAStates[key] = ThreeAState(
+                            ae = result.get(CaptureResult.CONTROL_AE_STATE),
+                            awb = result.get(CaptureResult.CONTROL_AWB_STATE),
+                            af = result.get(CaptureResult.CONTROL_AF_STATE),
+                        )
+                    }
+                },
+            )
+        }
         val features = cameraFeatures[key]
         if (enhanced && features != null) {
             val extender = Camera2Interop.Extender(builder)
@@ -717,7 +757,8 @@ class IntervalCaptureService : LifecycleService() {
         }
         val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras && it !in fallbackCameras }
         val hdrLine = if (hdr.isEmpty()) "" else "\nUltra HDR: ${hdr.joinToString()}"
-        return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting$hdrLine"
+        val tuningLine = "\n人の検出: " + cameraEntries.joinToString { "${it.key} ${tuningOf(it.key).lensClass.label}" }
+        return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting$hdrLine$tuningLine"
     }
 
     private fun runningDetail(intervalSeconds: Int): String {
@@ -866,7 +907,7 @@ class IntervalCaptureService : LifecycleService() {
         val threshold = NightMotion.thresholdFor(reference, shot.frame, motionThreshold)
         threshold.noise?.let { Log.d(TAG, "Dark frame for $key; noise $it") }
         val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
-        val tracker = targetTrackers.getOrPut(key) { TargetTracker() }
+        val tracker = targetTrackers.getOrPut(key) { TargetTracker(minMove = tuningOf(key).minMove) }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
         // スマホが動いていて、撮影している人も歩いている（体ごと動いている）回は、写っているものに関係なく保存する。
         // 歩きながらの撮影では景色ごと変わり、重ね直しも人の検出も当てにならないため。
@@ -939,7 +980,7 @@ class IntervalCaptureService : LifecycleService() {
                 }
                 val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, threshold)
                 if (pixelMotion.motionDetected) {
-                    detections = withZoomedDetections(detector, shot, mask, detections, allOrientations)
+                    detections = withZoomedDetections(key, detector, shot, mask, detections, allOrientations)
                 }
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
                 // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
@@ -1017,6 +1058,7 @@ class IntervalCaptureService : LifecycleService() {
      * 遠くの小さな人を見つけるため。検出が 1 回増えるので、変化があった回だけ行う。
      */
     private fun withZoomedDetections(
+        key: String,
         detector: TargetDetector,
         shot: InMemoryResult.Captured,
         mask: BooleanArray,
@@ -1030,12 +1072,18 @@ class IntervalCaptureService : LifecycleService() {
                 MovingTargets.shareOfChangeInside(mask, width, height, it.box) >= MovingTargets.MIN_SHARE_OF_CHANGE
         }
         if (explained) return detections
-        val region = MovingTargets.changedRegion(mask, width, height) ?: return detections
-        val zoomed = detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, deviceProfile.detectSize, allOrientations)
+        val tuning = tuningOf(key)
+        val region = MovingTargets.changedRegion(mask, width, height, tuning.zoomMinRegion) ?: return detections
+        val zoomed = detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, detectSizeOf(key), allOrientations)
         if (zoomed.isEmpty()) return detections
         Log.i(TAG, "Zoomed detection found ${zoomed.size} target(s) in $region")
         return TargetTracker.fuse(detections + zoomed)
     }
+
+    private fun tuningOf(key: String): DetectionTuning = detectionTunings[key] ?: CameraDetectionTuning.WIDE
+
+    /** カメラ [key] で人の検出に渡す画像の長辺（機種ごとの大きさ × カメラの画角による倍率）。 */
+    private fun detectSizeOf(key: String): Int = (deviceProfile.detectSize * tuningOf(key).detectSizeFactor).toInt()
 
     private fun publishDetectorSummary() {
         val detector = when {
@@ -1092,8 +1140,9 @@ class IntervalCaptureService : LifecycleService() {
                     group.forEach { onShot(it, InMemoryResult.Failed(failure)) }
                     continue
                 }
-                // 切り替え直後は露出が合っておらず、暗い画像を動体と誤判定するため待つ。
-                delay(deviceProfile.switchSettleMs)
+                // 切り替え直後は露出・ホワイトバランス・ピントが合っておらず、暗い画像や色の違う画像を動体と
+                // 誤判定するため、カメラごとにそれらが落ち着くまで待つ。
+                waitUntilSettled(group)
             }
             val captures = boundCaptures
             val taken = coroutineScope {
@@ -1108,12 +1157,12 @@ class IntervalCaptureService : LifecycleService() {
                         // 揺れの合間まで、手持ちなら手のふるえの合間まで待つ。止まっていれば待たない。
                         val walking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
                         waitForSteadyMoment(if (walking) SteadyMoment.MAX_WAIT_MS else SteadyMoment.MAX_WAIT_HANDHELD_MS)
-                        val first = captureToMemory(captures.getValue(key))
+                        val first = captureToMemory(key, captures.getValue(key))
                         if (first is InMemoryResult.Captured) return@async first
                         // 切り替え直後などで失敗したら、もう少し待って 1 回だけ撮り直す。
                         Log.w(TAG, "Retrying camera $key after: ${(first as InMemoryResult.Failed).message}")
                         delay(deviceProfile.switchSettleMs)
-                        val second = captureToMemory(captures.getValue(key))
+                        val second = captureToMemory(key, captures.getValue(key))
                         if (second is InMemoryResult.Failed && (boundFullResolution || boundEnhanced)) {
                             // 全画素・質を上げる設定では撮れないカメラ。次からはふつうの撮り方でつなぐ。
                             Log.w(TAG, "Camera $key failed twice with full resolution / enhanced capture; falling back")
@@ -1136,7 +1185,7 @@ class IntervalCaptureService : LifecycleService() {
         if (!GyroBlur.isBlurry(blur)) return captured
         waitForSteadyMoment(SteadyMoment.MAX_WAIT_MS)
         val capture = boundCaptures[key] ?: return captured
-        val retake = captureToMemory(capture) as? InMemoryResult.Captured ?: return captured
+        val retake = captureToMemory(key, capture) as? InMemoryResult.Captured ?: return captured
         retake.image = null
         val retakeBlur = blurOf(key, retake)
         Log.i(TAG, "Blurry shot for $key (blur=$blur of the width); retake blur=$retakeBlur")
@@ -1155,6 +1204,28 @@ class IntervalCaptureService : LifecycleService() {
         val speed = gyroHistory.maxBetween(start - GyroBlur.SEARCH_MARGIN_NANOS, end + GyroBlur.SEARCH_MARGIN_NANOS)
             ?: return null
         return GyroBlur.blurFraction(speed, exposure, ratio)
+    }
+
+    /**
+     * つないだカメラ [keys] の露出・ホワイトバランス・ピントが落ち着くまで待つ（[CameraSettling]）。最長は機種ごとの
+     * 待ち時間の 2 倍。状態が届かない夜景モードでは、これまでどおり機種ごとの待ち時間だけ待つ。
+     */
+    private suspend fun waitUntilSettled(keys: List<String>) {
+        if (boundNight) {
+            delay(deviceProfile.switchSettleMs)
+            return
+        }
+        val started = SystemClock.elapsedRealtime()
+        val maxWait = deviceProfile.switchSettleMs * 2
+        while (true) {
+            val waited = SystemClock.elapsedRealtime() - started
+            val states = keys.map { threeAStates[it] }
+            if (CameraSettling.doneWaiting(states, waited, maxWait)) {
+                if (waited >= maxWait) Log.i(TAG, "Cameras $keys did not settle in ${maxWait}ms: $states")
+                return
+            }
+            delay(SETTLE_POLL_MS)
+        }
     }
 
     /**
@@ -1190,7 +1261,7 @@ class IntervalCaptureService : LifecycleService() {
         if (!focusAt(key, center)) return null
         waitForFramesAfterFocus()
         val capture = boundCaptures[key] ?: return null
-        return captureToMemory(capture) as? InMemoryResult.Captured
+        return captureToMemory(key, capture) as? InMemoryResult.Captured
     }
 
     /**
@@ -1236,11 +1307,11 @@ class IntervalCaptureService : LifecycleService() {
         continuation.invokeOnCancellation { cancel(false) }
     }
 
-    private suspend fun captureToMemory(capture: ImageCapture): InMemoryResult =
-        withTimeoutOrNull(CAPTURE_TIMEOUT_MS) { takePictureToMemory(capture) }
+    private suspend fun captureToMemory(key: String, capture: ImageCapture): InMemoryResult =
+        withTimeoutOrNull(CAPTURE_TIMEOUT_MS) { takePictureToMemory(capture, detectSizeOf(key)) }
             ?: InMemoryResult.Failed("撮影が時間内に終わりませんでした")
 
-    private suspend fun takePictureToMemory(capture: ImageCapture): InMemoryResult =
+    private suspend fun takePictureToMemory(capture: ImageCapture, detectSize: Int): InMemoryResult =
         suspendCancellableCoroutine { continuation ->
             capture.takePicture(
                 captureExecutor,
@@ -1250,7 +1321,7 @@ class IntervalCaptureService : LifecycleService() {
                             val buffer = it.planes[0].buffer
                             val jpeg = ByteArray(buffer.remaining()).also { bytes -> buffer.get(bytes) }
                             // 人の検出と動体検知で同じ縮小画像を使い、大きな JPEG の読み込みを 1 回で済ませる。
-                            val small = MotionFrameSampler.decode(jpeg, deviceProfile.detectSize)
+                            val small = MotionFrameSampler.decode(jpeg, detectSize)
                             if (small == null) {
                                 InMemoryResult.Failed("画像を解析できませんでした")
                             } else {
@@ -1550,6 +1621,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** 露出・ホワイトバランス・ピントが落ち着いたかを見直す間隔。 */
+        private const val SETTLE_POLL_MS = 20L
         /** ピントを合わせ直してから、合わせた後の映像（30 コマ/秒で 3 コマほど）がたまるまで待つ時間。 */
         private const val ZSL_AFTER_FOCUS_MS = 100L
         /** ぶれの少ない瞬間を待つときに、回転の速さを見直す間隔。 */

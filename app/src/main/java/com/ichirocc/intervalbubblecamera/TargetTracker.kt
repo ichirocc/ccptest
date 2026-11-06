@@ -39,7 +39,11 @@ data class TrackedTarget(
  * 確からしさの低い検出は「まだ見つかっていない追跡中の対象」とだけ対応づける。半分隠れた・ぶれた人を
  * 見失いにくくしつつ、低い検出だけで新しい対象（誤検出）を作らない。
  */
-class TargetTracker(private val maxMisses: Int = 3) {
+class TargetTracker(
+    private val maxMisses: Int = 3,
+    /** 人の位置がこれ以上動いたら「動いた」とみなす（カメラの画角で変える。[CameraDetectionTuning]）。 */
+    private val minMove: Double = MIN_MOVE,
+) {
     private class Track(val id: Int, val kind: TargetKind, var box: NormalizedBox, var misses: Int)
 
     private val tracks = mutableListOf<Track>()
@@ -50,7 +54,7 @@ class TargetTracker(private val maxMisses: Int = 3) {
     /**
      * 今回の検出で追跡を更新し、今回見えている対象を返す。動いたかどうかは
      * 「変化した画素の [MovingTargets.MIN_SHARE_OF_CHANGE] 以上が枠に入る」か
-     * 「前回から中心が [MIN_MOVE] 以上動いた」で決める。
+     * 「前回から中心が [minMove] 以上動いた」で決める。
      */
     fun update(detections: List<DetectedTarget>, shareOfChange: (NormalizedBox) -> Double): List<TrackedTarget> {
         val unmatched = tracks.toMutableList()
@@ -94,7 +98,7 @@ class TargetTracker(private val maxMisses: Int = 3) {
         shareOfChange: (NormalizedBox) -> Double,
     ): TrackedTarget {
         val movedBy = if (matched) distance(track.box.center, detection.box.center) else 0.0
-        val moving = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE || movedBy >= MIN_MOVE
+        val moving = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE || movedBy >= minMove
         if (matched) {
             unmatched.remove(track)
             track.box = detection.box
