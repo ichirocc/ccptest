@@ -122,4 +122,28 @@ class ImageQualityTest {
         assertTrue(SteadyMoment.shouldCapture(1.0, SteadyMoment.MAX_WAIT_HANDHELD_MS, SteadyMoment.MAX_WAIT_HANDHELD_MS))
         assertFalse(SteadyMoment.shouldCapture(1.0, SteadyMoment.MAX_WAIT_HANDHELD_MS, SteadyMoment.MAX_WAIT_MS))
     }
+
+    @Test
+    fun `the noise threshold has an upper limit`() {
+        assertEquals(NightMotion.MAX_NOISE_THRESHOLD, NightMotion.thresholdForNoise(100.0))
+        assertEquals(NightMotion.MAX_NOISE_THRESHOLD, MotionThreshold.DEFAULT.copy(noise = NoiseModel(0.0, 10_000.0)).pixelThresholdAt(30))
+    }
+
+    @Test
+    fun `the noise of a moved dark scene is estimated after lining the frames up`() {
+        val texture = Random(20)
+        val scene = IntArray(width * height) { 10 + texture.nextInt(41) }
+        val noise = Random(21)
+        val previous = LumaFrame(width, height, IntArray(width * height) { (scene[it] + noise.nextGaussian() * 4).toInt().coerceIn(0, 255) })
+        // スマホが右へ 3・下へ 2 画素ぶん動いた。
+        val current = LumaFrame(width, height, IntArray(width * height) { i ->
+            val x = (i % width - 3).coerceIn(0, width - 1)
+            val y = (i / width - 2).coerceIn(0, height - 1)
+            (scene[y * width + x] + noise.nextGaussian() * 4).toInt().coerceIn(0, 255)
+        })
+        val misaligned = NightMotion.estimateNoise(previous, current)!!
+        val aligned = NightMotion.estimateNoise(previous, current, FrameShift(3, 2))!!
+        assertTrue("misaligned ${misaligned.sigma(30.0)}", misaligned.sigma(30.0) > 8.0)
+        assertEquals(4.0, aligned.sigma(30.0), 1.0)
+    }
 }

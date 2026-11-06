@@ -88,6 +88,7 @@ import com.ichirocc.intervalbubblecamera.WalkingDetector
 import com.ichirocc.intervalbubblecamera.ThermalPolicy
 import com.ichirocc.intervalbubblecamera.overlay.BubbleOverlay
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -307,6 +308,9 @@ class IntervalCaptureService : LifecycleService() {
         currentIntervalSeconds = intervalSeconds
         currentIconColor = iconColor
         motionThreshold = threshold
+        // 撮影中にもう一度開始されたときは、センサーを一度外してから付け直す（二重に受け取らず、古い値も残さない）。
+        stopSensors()
+        focusedAt.clear()
         motionReferences.clear()
         orientationAtFrame.clear()
         gravityAtFrame.clear()
@@ -711,7 +715,7 @@ class IntervalCaptureService : LifecycleService() {
             nightModeSwitch.night -> "夜景モード（${nightCameras.joinToString()}）"
             else -> "普通のモード（暗いと${nightCameras.joinToString()}は夜景モード）"
         }
-        val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras }
+        val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras && it !in fallbackCameras }
         val hdrLine = if (hdr.isEmpty()) "" else "\nUltra HDR: ${hdr.joinToString()}"
         return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting$hdrLine"
     }
@@ -822,7 +826,9 @@ class IntervalCaptureService : LifecycleService() {
     private suspend fun saveInBackground(generation: Int, shots: Map<String, Pair<ByteArray, Int>>) {
         saveJob?.join()
         saveJob = lifecycleScope.launch {
-            val result = withContext(saveDispatcher) {
+            // 撮影を止めても、書きかけの写真は書き終えて枚数に数える（止めると lifecycleScope が取り消されるため、
+            // 取り消されない文脈で保存する）。
+            val result = withContext(NonCancellable + saveDispatcher) {
                 runCatching { saveCameraSet(shots) }
                     .onFailure { Log.w(TAG, "Unable to save motion photos", it) }
             }
@@ -872,7 +878,7 @@ class IntervalCaptureService : LifecycleService() {
         }
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
-        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame, threshold) else null
+        val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
         val pixelMotion = compensation?.motion ?: rawMotion
         // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
         // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
@@ -992,9 +998,14 @@ class IntervalCaptureService : LifecycleService() {
     /** スマホの動きを打ち消した比べ方の結果。 */
     private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
 
-    /** 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。 */
-    private fun compensateShift(reference: LumaFrame, frame: LumaFrame, threshold: MotionThreshold): ShiftCompensation? {
+    /**
+     * 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。
+     * 暗い場面の雑音も、ずれを打ち消して重ねた画素どうしで見積もり直す（ずれたままの見積もりは景色の模様の
+     * 差まで雑音に数えて大きすぎ、閾値が上がって何も動体にならなくなるため）。
+     */
+    private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
         val shift = FrameAlignment.estimate(reference, frame)
+        val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
         val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
         return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold))
@@ -1089,7 +1100,10 @@ class IntervalCaptureService : LifecycleService() {
                 group.map { key ->
                     key to async {
                         // 保存されうる画像は必ずピントを合わせてから撮る（最後に動いた位置、無ければ中央）。
-                        focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER)
+                        val alreadyFocused = focusedAt[key]
+                        if (focusAt(key, lastMotionCenters[key] ?: FRAME_CENTER) && focusedAt[key] != alreadyFocused) {
+                            waitForFramesAfterFocus()
+                        }
                         // スマホがほぼ止まった瞬間を待って撮る（ぶれを減らす。ジャイロで回転を測る）。歩きながらなら 1 歩ごとの
                         // 揺れの合間まで、手持ちなら手のふるえの合間まで待つ。止まっていれば待たない。
                         val walking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
@@ -1143,6 +1157,14 @@ class IntervalCaptureService : LifecycleService() {
         return GyroBlur.blurFraction(speed, exposure, ratio)
     }
 
+    /**
+     * 遅れの少ない撮影（ZSL）は、カメラが流し続けている直前の映像から 1 枚を取り出す。ピントを合わせ直した
+     * 直後は、取り出す映像がまだ合わせる前のものかもしれないので、合わせた後の映像がたまるまで少し待つ。
+     */
+    private suspend fun waitForFramesAfterFocus() {
+        if (boundEnhanced) delay(ZSL_AFTER_FOCUS_MS)
+    }
+
     /** 回転の速さが小さくなる（スマホがほぼ止まる）まで、最大で [maxWaitMs] 待つ。 */
     private suspend fun waitForSteadyMoment(maxWaitMs: Long) {
         val started = SystemClock.elapsedRealtime()
@@ -1166,6 +1188,7 @@ class IntervalCaptureService : LifecycleService() {
         // すでにその位置にピントを合わせて撮った画像なら、撮り直しても同じなので撮り直さない。
         if (focusedAt[key]?.first == center) return null
         if (!focusAt(key, center)) return null
+        waitForFramesAfterFocus()
         val capture = boundCaptures[key] ?: return null
         return captureToMemory(capture) as? InMemoryResult.Captured
     }
@@ -1383,6 +1406,7 @@ class IntervalCaptureService : LifecycleService() {
         skippedDetections.clear()
         fallbackCameras.clear()
         targetTrackers.clear()
+        focusedAt.clear()
         orientationListener.disable()
         stopSensors()
         releaseWakeLock()
@@ -1404,6 +1428,7 @@ class IntervalCaptureService : LifecycleService() {
         skippedDetections.clear()
         fallbackCameras.clear()
         targetTrackers.clear()
+        focusedAt.clear()
         orientationListener.disable()
         stopSensors()
         releaseWakeLock()
@@ -1525,6 +1550,8 @@ class IntervalCaptureService : LifecycleService() {
         private const val ALBUM_NAME = "IntervalBubbleCamera"
         private const val WAKE_LOCK_TAG = "IntervalBubbleCamera:IntervalCapture"
         private const val FOCUS_TIMEOUT_MS = 2_000L
+        /** ピントを合わせ直してから、合わせた後の映像（30 コマ/秒で 3 コマほど）がたまるまで待つ時間。 */
+        private const val ZSL_AFTER_FOCUS_MS = 100L
         /** ぶれの少ない瞬間を待つときに、回転の速さを見直す間隔。 */
         private const val STEADY_POLL_MS = 15L
         private const val GYRO_MAX_AGE_NANOS = 200_000_000L
