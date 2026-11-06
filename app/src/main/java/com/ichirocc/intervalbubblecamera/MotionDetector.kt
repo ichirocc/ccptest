@@ -192,7 +192,12 @@ object MovingTargets {
      * ばらばらの小さな変化に引っぱられないよう、変化した画素の 5〜95% の位置で囲み、余白をつける。
      * 変化した画素が少なすぎる、または範囲が広すぎるときは null。
      */
-    fun changedRegion(mask: BooleanArray, width: Int, height: Int): NormalizedBox? {
+    fun changedRegion(
+        mask: BooleanArray,
+        width: Int,
+        height: Int,
+        minSize: Double = REGION_MIN_SIZE,
+    ): NormalizedBox? {
         require(mask.size == width * height) { "mask must be width * height" }
         val xs = mutableListOf<Int>()
         val ys = mutableListOf<Int>()
@@ -210,7 +215,7 @@ object MovingTargets {
         val bottom = (at(ys, 0.95) + 1).toDouble() / height
 
         fun span(lo: Double, hi: Double): Pair<Double, Double> {
-            val size = maxOf((hi - lo) * (1 + 2 * REGION_MARGIN), REGION_MIN_SIZE).coerceAtMost(1.0)
+            val size = maxOf((hi - lo) * (1 + 2 * REGION_MARGIN), minSize).coerceAtMost(1.0)
             val center = (lo + hi) / 2
             val start = (center - size / 2).coerceIn(0.0, 1.0 - size)
             return start to start + size
