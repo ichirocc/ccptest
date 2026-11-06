@@ -11,6 +11,8 @@ import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.ImageButton
 import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.RadioButton
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -42,6 +44,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lastPhoto: TextView
     private lateinit var cameraInfo: TextView
     private lateinit var failedCameras: TextView
+    private lateinit var presetButtons: Map<CapturePreset, RadioButton>
+    private lateinit var presetDescription: TextView
+    private lateinit var detailToggleButton: MaterialButton
+    private lateinit var detailSettings: LinearLayout
     private lateinit var intervalValue: TextView
     private lateinit var intervalSeekBar: SeekBar
     private lateinit var motionPixelValue: TextView
@@ -61,6 +67,9 @@ class MainActivity : AppCompatActivity() {
     private var selectedIconColor = AppIconColor.DEFAULT
     private var pendingStart = false
     private var minimizeWhenRunning = false
+
+    /** 撮り方を選んだ結果としてスライダーを動かしている間は true（スライダー側から撮り方を選び直さない）。 */
+    private var applyingPreset = false
 
     private val cameraPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -136,6 +145,16 @@ class MainActivity : AppCompatActivity() {
         lastPhoto = findViewById(R.id.lastPhoto)
         cameraInfo = findViewById(R.id.cameraInfo)
         failedCameras = findViewById(R.id.failedCameras)
+        presetButtons = linkedMapOf(
+            CapturePreset.STANDARD to findViewById(R.id.presetStandard),
+            CapturePreset.DISTANT to findViewById(R.id.presetDistant),
+            CapturePreset.NEARBY to findViewById(R.id.presetNearby),
+            CapturePreset.LONG_RUN to findViewById(R.id.presetLongRun),
+            CapturePreset.CUSTOM to findViewById(R.id.presetCustom),
+        )
+        presetDescription = findViewById(R.id.presetDescription)
+        detailToggleButton = findViewById(R.id.detailToggleButton)
+        detailSettings = findViewById(R.id.detailSettings)
         intervalValue = findViewById(R.id.intervalValue)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
         motionPixelValue = findViewById(R.id.motionPixelValue)
@@ -178,6 +197,11 @@ class MainActivity : AppCompatActivity() {
         motionPixelSeekBar.progress = MotionThreshold.progressFromPixel(savedThreshold.pixelThreshold)
         motionAreaSeekBar.progress = MotionThreshold.progressFromArea(savedThreshold.areaPermille)
         renderMotionThreshold()
+        // 保存してある値がどの撮り方に当たるかを見分けて選ぶ。当たらなければカスタムにして、その値が
+        // 見えるよう詳しい設定を開いておく。
+        val preset = currentPreset()
+        renderPreset(preset)
+        setDetailsVisible(preset == CapturePreset.CUSTOM)
 
         selectedIconColor = AppIconColor.fromStorageKey(
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
@@ -192,6 +216,7 @@ class MainActivity : AppCompatActivity() {
                 intervalValue.text = getString(R.string.interval_seconds, seconds)
                 if (fromUser) {
                     preferences.edit { putInt(KEY_INTERVAL_SECONDS, seconds) }
+                    if (!applyingPreset) renderPreset(currentPreset())
                 }
             }
 
@@ -202,7 +227,10 @@ class MainActivity : AppCompatActivity() {
         val thresholdListener = object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 renderMotionThreshold()
-                if (fromUser) saveMotionThreshold(selectedMotionThreshold())
+                if (fromUser) {
+                    saveMotionThreshold(selectedMotionThreshold())
+                    if (!applyingPreset) renderPreset(currentPreset())
+                }
             }
 
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
@@ -210,6 +238,11 @@ class MainActivity : AppCompatActivity() {
         }
         motionPixelSeekBar.setOnSeekBarChangeListener(thresholdListener)
         motionAreaSeekBar.setOnSeekBarChangeListener(thresholdListener)
+
+        presetButtons.forEach { (preset, button) ->
+            button.setOnClickListener { selectPreset(preset) }
+        }
+        detailToggleButton.setOnClickListener { setDetailsVisible(!detailSettings.isVisible) }
 
         iconColorButtons.forEach { (color, button) ->
             button.setOnClickListener { selectIconColor(color) }
@@ -271,6 +304,7 @@ class MainActivity : AppCompatActivity() {
         failedCameras.isVisible = state.isActive && state.failedCameras.isNotEmpty()
 
         val controlsEnabled = !state.isActive
+        presetButtons.values.forEach { it.isEnabled = controlsEnabled }
         intervalSeekBar.isEnabled = controlsEnabled
         motionPixelSeekBar.isEnabled = controlsEnabled
         motionAreaSeekBar.isEnabled = controlsEnabled
@@ -294,6 +328,61 @@ class MainActivity : AppCompatActivity() {
             minimizeWhenRunning = false
             window.decorView.post { moveTaskToBack(true) }
         }
+    }
+
+    /** 今のスライダーの値に当たる撮り方（どれでもなければカスタム）。 */
+    private fun currentPreset(): CapturePreset = CapturePreset.matching(
+        IntervalPolicy.secondsFromSeekProgress(intervalSeekBar.progress),
+        selectedMotionThreshold(),
+    )
+
+    /**
+     * 撮り方 [preset] を選ぶ。撮影間隔と動体検知の閾値をまとめてその値にして保存する。カスタムを選んだときは
+     * 値はそのままにして、詳しい設定を開く。
+     */
+    private fun selectPreset(preset: CapturePreset) {
+        if (preset == CapturePreset.CUSTOM) {
+            renderPreset(preset)
+            setDetailsVisible(true)
+            return
+        }
+        applyingPreset = true
+        try {
+            intervalSeekBar.progress = IntervalPolicy.seekProgressFromSeconds(preset.intervalSeconds)
+            motionPixelSeekBar.progress = MotionThreshold.progressFromPixel(preset.pixelThreshold)
+            motionAreaSeekBar.progress = MotionThreshold.progressFromArea(preset.areaPermille)
+        } finally {
+            applyingPreset = false
+        }
+        preferences.edit { putInt(KEY_INTERVAL_SECONDS, preset.intervalSeconds) }
+        saveMotionThreshold(preset.threshold)
+        renderPreset(preset)
+    }
+
+    /** 撮り方の選択と説明を [preset] に合わせる。 */
+    private fun renderPreset(preset: CapturePreset) {
+        presetButtons.forEach { (each, button) -> button.isChecked = each == preset }
+        val seconds = if (preset == CapturePreset.CUSTOM) {
+            IntervalPolicy.secondsFromSeekProgress(intervalSeekBar.progress)
+        } else {
+            preset.intervalSeconds
+        }
+        presetDescription.text = getString(
+            when (preset) {
+                CapturePreset.STANDARD -> R.string.preset_standard_description
+                CapturePreset.DISTANT -> R.string.preset_distant_description
+                CapturePreset.NEARBY -> R.string.preset_nearby_description
+                CapturePreset.LONG_RUN -> R.string.preset_long_run_description
+                CapturePreset.CUSTOM -> R.string.preset_custom_description
+            },
+            seconds,
+        )
+    }
+
+    /** 詳しい設定（撮影間隔と動体検知のスライダー）を開く・閉じる。 */
+    private fun setDetailsVisible(visible: Boolean) {
+        detailSettings.isVisible = visible
+        detailToggleButton.text = getString(if (visible) R.string.detail_hide else R.string.detail_show)
     }
 
     private fun selectedMotionThreshold(): MotionThreshold = MotionThreshold(

@@ -62,4 +62,18 @@
     <string name="notification_channel_description">写真の自動撮影中に表示される常駐通知</string>
     <string name="notification_stop">停止</string>
     <string name="bubble_description">撮影中。タップしてアプリを開く</string>
+    <string name="section_preset">撮り方</string>
+    <string name="preset_standard">おすすめ（標準）</string>
+    <string name="preset_distant">屋外・遠くの人</string>
+    <string name="preset_nearby">室内・近くの人</string>
+    <string name="preset_long_run">長時間・電池優先</string>
+    <string name="preset_custom">カスタム（詳しく設定した値）</string>
+    <string name="preset_standard_description">迷ったらこれ。%1$d秒ごとに撮り、人がふつうに動くと保存します。</string>
+    <string name="preset_distant_description">%1$d秒ごとに撮り、遠くの小さな人の動きも拾います（小さな変化でも保存しやすい）。</string>
+    <string name="preset_nearby_description">%1$d秒ごとに撮り、照明のちらつきなど小さな変化では保存しません。</string>
+    <string name="preset_long_run_description">%1$d秒ごとに撮り、撮る回数を減らして電池と発熱を抑えます。</string>
+    <string name="preset_custom_description">「詳しく設定」で決めた値で撮ります（%1$d秒ごと）。</string>
+    <string name="preset_auto_note">暗さ・手ぶれ・本体の温度・カメラの画角は、どの撮り方でも自動で合わせます。</string>
+    <string name="detail_show">詳しく設定する</string>
+    <string name="detail_hide">詳しい設定を閉じる</string>
 </resources>
