@@ -41,25 +41,21 @@ object MotionFrameSampler {
         return resized
     }
 
+    /** JPEG の幅と高さ（画素。中身は読み込まず、見出しだけ読む）。読めなければ null。 */
+    fun size(jpeg: ByteArray): Pair<Int, Int>? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        return if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth to bounds.outHeight else null
+    }
+
     /** 読み込んだ画像の長辺が、ほしい大きさのこの倍を超えたら縮める。 */
     private const val MAX_OVERSIZE = 1.25
 
     /** 読み込んだ画像から動体検知用の 80×60 の輝度画像を作る（[image] はそのまま残す）。 */
     fun fromBitmap(image: Bitmap): LumaFrame {
-        val grid = Bitmap.createScaledBitmap(
-            image,
-            MotionDetector.GRID_WIDTH,
-            MotionDetector.GRID_HEIGHT,
-            true,
-        )
-        val argb = IntArray(MotionDetector.GRID_WIDTH * MotionDetector.GRID_HEIGHT)
-        grid.getPixels(argb, 0, grid.width, 0, 0, grid.width, grid.height)
-        if (grid !== image) grid.recycle()
-
-        return LumaFrame(
-            MotionDetector.GRID_WIDTH,
-            MotionDetector.GRID_HEIGHT,
-            IntArray(argb.size) { MotionDetector.lumaOf(argb[it]) },
-        )
+        // 格子ごとに中の画素をすべて平均する（点で取ると、1 画素に満たない手ぶれで値が大きく変わるため）。
+        val argb = IntArray(image.width * image.height)
+        image.getPixels(argb, 0, image.width, 0, 0, image.width, image.height)
+        return MotionDetector.gridFromArgb(argb, image.width, image.height)
     }
 }

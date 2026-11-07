@@ -70,17 +70,25 @@ object FrameAlignment {
      * ずれ [shift] を打ち消して比べたときに変わった画素（[MovingTargets.changedMask] と同じ基準）。
      * 前回の画像に写っていなかった縁の部分は「変わっていない」とする。
      */
-    fun alignedMask(previous: LumaFrame, current: LumaFrame, shift: FrameShift, threshold: MotionThreshold): BooleanArray {
+    fun alignedMask(
+        previous: LumaFrame,
+        current: LumaFrame,
+        shift: FrameShift,
+        threshold: MotionThreshold,
+        blockSize: Int = 0,
+    ): BooleanArray {
         val width = current.width
         val height = current.height
         val mean = meanShift(previous, current)
+        val blockShift = if (blockSize > 0) blockMeanShifts(previous, current, shift, blockSize) else null
         return BooleanArray(width * height) { i ->
             val x = i % width
             val y = i / width
             val px = x - shift.dx
             val py = y - shift.dy
+            val offset = blockShift?.get((y / blockSize) * ((width + blockSize - 1) / blockSize) + x / blockSize) ?: mean
             px in 0 until width && py in 0 until height &&
-                abs(current.pixels[i] - previous.pixels[py * width + px] - mean) >
+                abs(current.pixels[i] - previous.pixels[py * width + px] - offset) >
                 threshold.pixelThresholdAt(previous.pixels[py * width + px])
         }
     }
@@ -110,6 +118,40 @@ object FrameAlignment {
             null
         }
         return MotionResult(ratio, detected, center)
+    }
+
+    /**
+     * 区画（[blockSize] 格子四方）ごとの、前回から今回への明るさの平均の差。照明が画面の一部だけ明るく・暗く
+     * なっても、区画ごとに差を引けばその変化は消える（人の動きは区画の中で形が変わるので残る）。
+     */
+    private fun blockMeanShifts(previous: LumaFrame, current: LumaFrame, shift: FrameShift, blockSize: Int): IntArray {
+        val width = current.width
+        val height = current.height
+        val bw = (width + blockSize - 1) / blockSize
+        val bh = (height + blockSize - 1) / blockSize
+        val sums = LongArray(bw * bh)
+        val counts = IntArray(bw * bh)
+        for (y in 0 until height) for (x in 0 until width) {
+            val px = x - shift.dx
+            val py = y - shift.dy
+            if (px !in 0 until width || py !in 0 until height) continue
+            val b = (y / blockSize) * bw + x / blockSize
+            sums[b] += (current.pixels[y * width + x] - previous.pixels[py * width + px]).toLong()
+            counts[b]++
+        }
+        return IntArray(bw * bh) { if (counts[it] == 0) 0 else Math.round(sums[it].toDouble() / counts[it]).toInt() }
+    }
+
+    /** 区画ごとに明るさをそろえて比べるときの区画の大きさ（格子。80×60 なら 8×6 区画）。 */
+    const val BLOCK_SIZE = 10
+
+    /** スマホが止まっている扱いでも、これだけ（格子）までのずれは重ね直す（2° 未満の手ぶれ）。 */
+    const val STEADY_MAX_SHIFT = 2
+
+    /** [mask] のうち、前回と重なった部分に対する変化した画素の割合。 */
+    fun changedRatio(mask: BooleanArray, width: Int, height: Int, shift: FrameShift): Double {
+        val overlap = (width - abs(shift.dx)) * (height - abs(shift.dy))
+        return if (overlap <= 0) 0.0 else mask.count { it }.toDouble() / overlap
     }
 
     /**

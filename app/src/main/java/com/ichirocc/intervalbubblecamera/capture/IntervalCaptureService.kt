@@ -61,6 +61,7 @@ import com.ichirocc.intervalbubblecamera.CameraDetectionTuning
 import com.ichirocc.intervalbubblecamera.CameraSettling
 import com.ichirocc.intervalbubblecamera.ThreeAState
 import com.ichirocc.intervalbubblecamera.DetectionTuning
+import com.ichirocc.intervalbubblecamera.DogfoodRecord
 import com.ichirocc.intervalbubblecamera.CameraFeatures
 import com.ichirocc.intervalbubblecamera.CapturePolicy
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
@@ -244,6 +245,10 @@ class IntervalCaptureService : LifecycleService() {
      */
     private val threeAStates = java.util.concurrent.ConcurrentHashMap<String, ThreeAState>()
 
+    /** 実機で使って確かめるための記録（[DogfoodLog]）。何周目かの番号も記録に入れる。 */
+    private val dogfood by lazy { DogfoodLog(DogfoodLog.directory(this)) }
+    private var cycleNumber = 0
+
     /** カメラごとの人の検出の調整（画角で決める。[CameraDetectionTuning]）。 */
     private val detectionTunings = mutableMapOf<String, DetectionTuning>()
 
@@ -294,6 +299,7 @@ class IntervalCaptureService : LifecycleService() {
                     intent.getIntExtra(EXTRA_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
                     intent.getIntExtra(EXTRA_MOTION_AREA_PERMILLE, MotionThreshold.DEFAULT.areaPermille),
                 )
+                dogfood.enabled = intent.getBooleanExtra(EXTRA_DOGFOOD_LOG, true)
                 startCapture(interval, iconColor, threshold)
             }
 
@@ -327,6 +333,13 @@ class IntervalCaptureService : LifecycleService() {
         // 撮影中にもう一度開始されたときは、センサーを一度外してから付け直す（二重に受け取らず、古い値も残さない）。
         stopSensors()
         focusedAt.clear()
+        cycleNumber = 0
+        logEvent(
+            "start",
+            "",
+            "model=${Build.MODEL} profile=${deviceProfile.name} interval=$intervalSeconds " +
+                "pixel=${threshold.pixelThreshold} area_permille=${threshold.areaPermille}",
+        )
         motionReferences.clear()
         orientationAtFrame.clear()
         gravityAtFrame.clear()
@@ -534,6 +547,7 @@ class IntervalCaptureService : LifecycleService() {
             if (!fullResolution && !enhanced) throw error
             // 全画素・質を上げる設定ではつなげなかった。このカメラはふつうの撮り方に戻す。
             Log.w(TAG, "Unable to bind $keys with full resolution / enhanced capture; falling back", error)
+            logEvent("bind_fallback", keys.joinToString("/"), "${error.javaClass.simpleName}: ${error.message}")
             fallbackCameras.addAll(keys)
             provider.unbindAll()
             bindCaptures(provider, keys, entries, night, fullResolution = false, enhanced = false)
@@ -574,6 +588,12 @@ class IntervalCaptureService : LifecycleService() {
         boundFullResolution = fullResolution
         boundEnhanced = enhanced
         if (fullResolution || enhanced) Log.i(TAG, "Bound $keys (full resolution=$fullResolution, enhanced=$enhanced)")
+        logEvent(
+            "bind",
+            keys.joinToString("/"),
+            "full_resolution=$fullResolution enhanced=$enhanced night=$night " +
+                "ultra_hdr=${enhanced && keys.any { it in ultraHdrCameras }} heat=$heatLevel",
+        )
     }
 
     private fun wantsFullResolution(keys: List<String>): Boolean =
@@ -806,6 +826,8 @@ class IntervalCaptureService : LifecycleService() {
      */
     private suspend fun captureWithMotionCheck(): PhotoResult {
         updateNightMode()
+        cycleNumber += 1
+        val traces = linkedMapOf<String, JudgeTrace>()
         val shots = linkedMapOf<String, InMemoryResult.Captured>()
         val judgements = linkedMapOf<String, MotionResult?>()
         var firstFailure: String? = null
@@ -815,6 +837,7 @@ class IntervalCaptureService : LifecycleService() {
         forEachCameraGroup { key, shot ->
             if (shot is InMemoryResult.Failed) {
                 Log.w(TAG, "Camera $key failed: ${shot.message}")
+                logEvent("capture_failed", key, shot.message)
                 failed.add(key)
                 if (firstFailure == null) firstFailure = shot.message
                 return@forEachCameraGroup
@@ -830,18 +853,28 @@ class IntervalCaptureService : LifecycleService() {
             }
             val lyingFlat = gravity?.let { CameraMovement.isLyingFlat(it) } ?: false
             val holderWalking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
+            val trace = JudgeTrace(rotation = rotation, tilt = tilt, walking = holderWalking)
+            traces[key] = trace
             val judgement = motionReferences[key]?.let {
-                judgeMotion(key, it, captured, rotation, tilt, lyingFlat, holderWalking)
+                judgeMotion(key, it, captured, rotation, tilt, lyingFlat, holderWalking, trace)
             }
+            if (judgement == null) trace.reason = "baseline"
             captured.image = null
             val center = judgement?.center
             if (center != null) {
                 lastMotionCenters[key] = center
-                captured = refocusAndRetake(key, center) ?: captured
+                val retaken = refocusAndRetake(key, center)
+                trace.refocused = retaken != null
+                captured = retaken ?: captured
                 captured.image = null
             }
             // 保存しそうな写真がいつもよりぶれていたら、止まった瞬間を待って撮り直し、くっきりしたほうを使う。
-            if (judgement?.motionDetected == true) captured = retakeIfBlurry(key, captured)
+            trace.blur = blurOf(key, captured)
+            if (judgement?.motionDetected == true) {
+                val sharper = retakeIfBlurry(key, captured)
+                trace.blurRetaken = sharper !== captured
+                captured = sharper
+            }
             motionReferences[key] = captured.frame
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
@@ -852,7 +885,10 @@ class IntervalCaptureService : LifecycleService() {
         recordFailures(failed)
         if (shots.isEmpty()) return PhotoResult.Failed(firstFailure ?: "カメラが準備されていません")
 
-        return when (val decision = CameraSetMotion.decide(judgements)) {
+        val decision = CameraSetMotion.decide(judgements)
+        val saved = decision is CameraSetDecision.Motion
+        shots.forEach { (key, shot) -> logShot(key, shot, judgements[key], traces.getValue(key), saved) }
+        return when (decision) {
             CameraSetDecision.Baseline -> PhotoResult.Baseline
             is CameraSetDecision.NoMotion -> PhotoResult.NoMotion(
                 decision.maxChangedRatio,
@@ -880,6 +916,8 @@ class IntervalCaptureService : LifecycleService() {
                 result.onSuccess { CaptureStateStore.markSavedAfterStop(it) }
                 return@launch
             }
+            result.onSuccess { logEvent("saved", "", it.joinToString(" ")) }
+                .onFailure { logEvent("save_failed", "", "${it.javaClass.simpleName}: ${it.message}") }
             result.fold(
                 onSuccess = { CaptureStateStore.markPhotosSaved(it) },
                 onFailure = { error ->
@@ -903,6 +941,7 @@ class IntervalCaptureService : LifecycleService() {
         phoneTiltDegrees: Double?,
         lyingFlat: Boolean,
         holderWalking: Boolean,
+        trace: JudgeTrace,
     ): MotionResult {
         // 暗い場面では雑音だけで変わったように見えるので、前回との差から明るさごとの雑音を見積もり、
         // 雑音より十分大きい変化だけを数える（ELD の雑音のモデル。NightMotion）。
@@ -911,24 +950,57 @@ class IntervalCaptureService : LifecycleService() {
         val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker(minMove = tuningOf(key).minMove) }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
+        trace.phoneMotion = phoneMotion.name
+        trace.rawChangedRatio = rawMotion.changedRatio
+        trace.noisePixelThreshold = threshold.noise?.let {
+            threshold.pixelThresholdAt(NightMotion.meanLuma(reference).toInt())
+        }
         // スマホが動いていて、撮影している人も歩いている（体ごと動いている）回は、写っているものに関係なく保存する。
         // 歩きながらの撮影では景色ごと変わり、重ね直しも人の検出も当てにならないため。
         val walkingShot = holderWalking && phoneMotion == PhoneMotion.MOVED
         fun finish(result: MotionResult): MotionResult {
+            trace.motion = result.motionDetected
             if (!walkingShot || result.motionDetected) return result
             Log.i(TAG, "Phone and its holder are moving for $key; saving")
+            trace.reason = "walking"
+            trace.motion = true
             return result.copy(motionDetected = true)
         }
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
         val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
-        val pixelMotion = compensation?.motion ?: rawMotion
+        // スマホが止まっている扱い（ジャイロで 2° 未満）でも、手ぶれで画面が 1〜2 格子ずれることがあるので、
+        // その範囲だけ重ね直して比べる（実機の写真で確かめると、1〜2° の手ぶれで変わる画素が 20〜40% から 0.5% 以下に
+        // 減った）。追跡中の位置はずらさない（確かめると、ずらしても結果は変わらなかった）。
+        val steadyShift = if (phoneMotion != PhoneMotion.MOVED) {
+            FrameAlignment.estimate(reference, shot.frame, FrameAlignment.STEADY_MAX_SHIFT)
+        } else {
+            FrameShift.NONE
+        }
+        val comparedShift = compensation?.shift ?: steadyShift
+        val comparedThreshold = compensation?.threshold ?: threshold
+        val pixelMotion = compensation?.motion ?: if (steadyShift != FrameShift.NONE) {
+            FrameAlignment.compareAligned(reference, shot.frame, steadyShift, threshold)
+        } else {
+            rawMotion
+        }
+        // 区画ごとに明るさをそろえて比べた変化。照明が一部だけ変わったときの変化は消え、人の動きや、すぐ近くを
+        // 覆ったものは残る。人に変化が重なったかと、近くを覆ったかの判定に使う。
+        val unevenMask = FrameAlignment.alignedMask(reference, shot.frame, comparedShift, comparedThreshold, FrameAlignment.BLOCK_SIZE)
+        val unevenRatio = FrameAlignment.changedRatio(unevenMask, shot.frame.width, shot.frame.height, comparedShift)
+        trace.changedRatio = pixelMotion.changedRatio
+        // 重ね直したずれ（スマホが動いた回は "moved:"、止まっている扱いの手ぶれは "steady:"）と、明るさをそろえた変化。
+        trace.compensatedShift = when {
+            compensation != null -> "moved:${comparedShift.dx}/${comparedShift.dy}"
+            steadyShift != FrameShift.NONE -> "steady:${comparedShift.dx}/${comparedShift.dy}"
+            else -> ""
+        } + " uneven=" + String.format(java.util.Locale.US, "%.4f", unevenRatio)
         // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
         // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
         val phoneMoved = phoneMotion == PhoneMotion.MOVED && compensation == null
         // スマホが止まっていて画面の大部分が変わったら、すぐ近くを人が覆った（スマホの上を人がまたいだなど）と
         // みなし、人を検出できなくても保存する。真下や真横から見た人は検出できないことが多いため。
-        val closeSubject = CameraMovement.closeSubject(phoneMotion, rawMotion.changedRatio)
+        val closeSubject = CameraMovement.closeSubject(phoneMotion, pixelMotion.changedRatio, unevenRatio)
         if (compensation != null) {
             Log.i(TAG, "Phone moved for $key; compensated ${compensation.shift} (change=${pixelMotion.changedRatio})")
             tracker.shift(
@@ -946,7 +1018,10 @@ class IntervalCaptureService : LifecycleService() {
         val withoutDetection = if (phoneMoved) pixelMotion.copy(motionDetected = false, center = null) else pixelMotion
         // 人の検出は全カメラで毎回行う（画像の変化が閾値未満でも、位置の移動で動きを拾う）。
         // 本体が熱いときは検出を止め、画像の変化だけで判定する（強制終了や性能低下を防ぐ）。
-        if (heatLevel.detection == DetectionLevel.NONE) return finish(withoutDetection)
+        if (heatLevel.detection == DetectionLevel.NONE) {
+            trace.reason = if (withoutDetection.motionDetected) "pixel_change(no_detection:heat)" else "no_change(no_detection:heat)"
+            return finish(withoutDetection)
+        }
         // 正立以外の向きでも探すのは、温度が普通で、画像が変わった・追跡中の対象がいる・スマホが動いた回だけ
         // （何も変わっていない回まで 4 回検出すると発熱が大きいため）。
         val allOrientations = heatLevel.detection == DetectionLevel.ALL_ORIENTATIONS &&
@@ -957,13 +1032,19 @@ class IntervalCaptureService : LifecycleService() {
         val skipped = skippedDetections[key] ?: 0
         if (nothingChanged && DetectionSkipping.shouldSkip(skipped, heatLevel)) {
             skippedDetections[key] = skipped + 1
+            trace.detectionSkipped = true
+            trace.reason = "skipped_no_change"
             return finish(withoutDetection)
         }
         skippedDetections[key] = 0
 
         // GPU の検出器は作ったスレッドでしか使えないため、作成も検出も専用の 1 本のスレッドで行う。
         return finish(withContext(detectionDispatcher) {
-            val detector = loadTargetDetector() ?: return@withContext withoutDetection
+            val detector = loadTargetDetector() ?: run {
+                trace.reason = if (withoutDetection.motionDetected) "pixel_change(no_detector)" else "no_change(no_detector)"
+                return@withContext withoutDetection
+            }
+            trace.detectionSkipped = false
             runCatching {
                 val image = shot.image ?: return@runCatching null
                 // 暗い画像は、人の検出に渡す前だけ明るくする（Zero-DCE の曲線。保存する写真は変えない）。
@@ -975,39 +1056,58 @@ class IntervalCaptureService : LifecycleService() {
                 } finally {
                     if (detectImage !== image) detectImage.recycle()
                 }
+                trace.detections = detections.size
+                trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
                     tracker.update(detections) { 0.0 }
-                    return@runCatching TargetTracker.personInFrame(detections)?.box
+                    val person = TargetTracker.personInFrame(detections)
+                    trace.targetKind = person?.kind?.name
+                    return@runCatching person?.box
                 }
-                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, threshold)
+                val mask = compensation?.mask ?: FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
                 if (pixelMotion.motionDetected) {
+                    val before = detections.size
                     detections = withZoomedDetections(key, detector, shot, mask, detections, allOrientations)
+                    // 切り出して探し直して、見つけたものが増えたか（まとめた後の数で比べる）。
+                    trace.zoomed = detections.size != before
+                    trace.detections = detections.size
+                    trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
                 }
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
                 // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(detections) { box ->
-                    if (pixelMotion.motionDetected) {
-                        MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    // 変化がその人の枠に集まっているときだけ、人に変化が重なったとみなす（照明の変化や手ぶれは画面じゅうに
+                    // 広がる）。区画ごとに明るさをそろえた変化で見る。
+                    val w = shot.frame.width
+                    val h = shot.frame.height
+                    if (pixelMotion.motionDetected && MovingTargets.changeConcentratedInside(unevenMask, w, h, box)) {
+                        MovingTargets.shareOfChangeInside(unevenMask, w, h, box)
                     } else {
                         0.0
                     }
                 }
-                TargetTracker.focusTarget(tracked)?.box
+                val target = TargetTracker.focusTarget(tracked)
+                trace.targetKind = target?.kind?.name
+                target?.box
             }.fold(
                 onSuccess = { box ->
                     if (box == null && closeSubject) {
                         Log.i(TAG, "Something close covered $key (change=${pixelMotion.changedRatio}); saving")
+                        trace.reason = "close_subject"
                         pixelMotion
                     } else if (box == null) {
+                        trace.reason = if (phoneMoved) "phone_moved" else "no_moving_target"
                         pixelMotion.copy(motionDetected = false, center = null)
                     } else {
                         if (phoneMoved) Log.i(TAG, "Phone moved for $key but a person is in frame; saving")
+                        trace.reason = (if (phoneMoved) "phone_moved_person:" else "moving_target:") + trace.targetKind
                         pixelMotion.copy(motionDetected = true, center = box.center)
                     }
                 },
                 onFailure = { error ->
                     Log.w(TAG, "Target detection failed; using pixel change only", error)
+                    trace.reason = "detection_failed"
                     withoutDetection
                 },
             )
@@ -1039,7 +1139,12 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     /** スマホの動きを打ち消した比べ方の結果。 */
-    private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
+    private class ShiftCompensation(
+        val shift: FrameShift,
+        val motion: MotionResult,
+        val mask: BooleanArray,
+        val threshold: MotionThreshold,
+    )
 
     /**
      * 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。
@@ -1051,7 +1156,7 @@ class IntervalCaptureService : LifecycleService() {
         val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
         val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold))
+        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold), threshold)
     }
 
     /**
@@ -1105,6 +1210,7 @@ class IntervalCaptureService : LifecycleService() {
         if (level == heatLevel) return
         Log.i(TAG, "Heat level ${heatLevel} -> $level (status=${powerManager.currentThermalStatus}, headroom=$lastHeadroom)")
         heatLevel = level
+        logEvent("heat", "", "level=$level headroom=$lastHeadroom")
         publishDetectorSummary()
     }
 
@@ -1328,6 +1434,7 @@ class IntervalCaptureService : LifecycleService() {
                                 InMemoryResult.Failed("画像を解析できませんでした")
                             } else {
                                 val frame = MotionFrameSampler.fromBitmap(small)
+                                val dimensions = MotionFrameSampler.size(jpeg)
                                 InMemoryResult.Captured(
                                     jpeg,
                                     it.imageInfo.rotationDegrees,
@@ -1336,6 +1443,8 @@ class IntervalCaptureService : LifecycleService() {
                                     // 露出の始まりの時刻（ジャイロと同じ時計）と露出時間。手ぶれの見積もりに使う。
                                     sensorTimestampNanos = it.imageInfo.timestamp,
                                     exposureSeconds = exposureSecondsOf(jpeg),
+                                    imageWidth = dimensions?.first,
+                                    imageHeight = dimensions?.second,
                                 )
                             }
                         }
@@ -1567,10 +1676,82 @@ class IntervalCaptureService : LifecycleService() {
         targetDetector = null
         detectionExecutor.execute { detector?.close() }
         detectionExecutor.shutdown()
+        dogfood.close()
         if (CaptureStateStore.state.value.isActive) {
             CaptureStateStore.markStopped("とるのが おわりました。")
         }
         super.onDestroy()
+    }
+
+    /** 1 台のカメラの 1 回の判定で、記録（[DogfoodRecord]）に残すことがら。分からないものは null。 */
+    private class JudgeTrace(
+        val rotation: Double?,
+        val tilt: Double?,
+        val walking: Boolean,
+    ) {
+        var phoneMotion = ""
+        var compensatedShift = ""
+        var rawChangedRatio: Double? = null
+        var changedRatio: Double? = null
+        var noisePixelThreshold: Int? = null
+        var detectionSkipped: Boolean? = null
+        var detections: Int? = null
+        var confidentPersons: Int? = null
+        var zoomed: Boolean? = null
+        var targetKind: String? = null
+        var motion: Boolean? = null
+        var reason = ""
+        var refocused: Boolean? = null
+        var blur: Double? = null
+        var blurRetaken: Boolean? = null
+    }
+
+    /** 撮影ごと・カメラごとの記録を 1 行書く。 */
+    private fun logShot(key: String, shot: InMemoryResult.Captured, judgement: MotionResult?, trace: JudgeTrace, saved: Boolean) {
+        dogfood.write(
+            DogfoodRecord(
+                time = DogfoodLog.now(),
+                kind = "shot",
+                cycle = cycleNumber,
+                camera = key,
+                intervalSeconds = currentIntervalSeconds,
+                pixelThreshold = motionThreshold.pixelThreshold,
+                areaPermille = motionThreshold.areaPermille,
+                fullResolution = boundFullResolution,
+                enhanced = boundEnhanced,
+                night = boundNight,
+                ultraHdr = boundEnhanced && key in ultraHdrCameras,
+                imageWidth = shot.imageWidth,
+                imageHeight = shot.imageHeight,
+                exposureSeconds = shot.exposureSeconds,
+                heat = heatLevel.name,
+                phoneMotion = trace.phoneMotion,
+                rotationDegrees = trace.rotation,
+                tiltDegrees = trace.tilt,
+                walking = trace.walking,
+                compensatedShift = trace.compensatedShift,
+                rawChangedRatio = trace.rawChangedRatio,
+                changedRatio = trace.changedRatio,
+                noisePixelThreshold = trace.noisePixelThreshold,
+                detectionSkipped = trace.detectionSkipped,
+                detections = trace.detections,
+                confidentPersons = trace.confidentPersons,
+                zoomed = trace.zoomed,
+                motion = judgement?.motionDetected,
+                reason = trace.reason,
+                refocused = trace.refocused,
+                blurFraction = trace.blur,
+                blurRetaken = trace.blurRetaken,
+                saved = saved,
+            ),
+        )
+    }
+
+    /** カメラのつなぎ方・温度の変化・失敗などの出来事を 1 行書く。 */
+    private fun logEvent(kind: String, camera: String, message: String) {
+        dogfood.write(
+            DogfoodRecord(time = DogfoodLog.now(), kind = "event", cycle = cycleNumber, camera = camera, reason = kind, message = message),
+        )
     }
 
     private sealed interface PhotoResult {
@@ -1601,6 +1782,9 @@ class IntervalCaptureService : LifecycleService() {
             val sensorTimestampNanos: Long,
             /** 露出時間（秒）。JPEG の Exif から。分からなければ null。 */
             val exposureSeconds: Double?,
+            /** 撮れた写真の幅と高さ（画素）。全画素で撮れたかを記録で確かめるため。 */
+            val imageWidth: Int?,
+            val imageHeight: Int?,
         ) : InMemoryResult
         data class Failed(val message: String) : InMemoryResult
     }
@@ -1614,6 +1798,7 @@ class IntervalCaptureService : LifecycleService() {
         const val EXTRA_ICON_COLOR = "icon_color"
         const val EXTRA_MOTION_PIXEL_THRESHOLD = "motion_pixel_threshold"
         const val EXTRA_MOTION_AREA_PERMILLE = "motion_area_permille"
+        const val EXTRA_DOGFOOD_LOG = "dogfood_log"
         const val LENS_BACK = "back"
         const val LENS_FRONT = "front"
 
