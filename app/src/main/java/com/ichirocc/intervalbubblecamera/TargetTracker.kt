@@ -22,12 +22,16 @@ data class DetectedTarget(val box: NormalizedBox, val kind: TargetKind, val scor
     val confident: Boolean get() = score >= TargetTracker.HIGH_SCORE
 }
 
-/** 追跡中の対象。[moving] はこの回に動いたと判定されたか。 */
+/**
+ * 追跡中の対象。[moving] はこの回に動いたと判定されたか。[boxJumpOnly] は、位置は動いたが枠の中の画素が
+ * 変わっていなかったので動いたとしなかったか（検証用の記録に残す）。
+ */
 data class TrackedTarget(
     val id: Int,
     val kind: TargetKind,
     val box: NormalizedBox,
     val moving: Boolean,
+    val boxJumpOnly: Boolean = false,
 )
 
 /**
@@ -55,7 +59,7 @@ class TargetTracker(
      * 今回の検出で追跡を更新し、今回見えている対象を返す。動いたかどうかは
      * 「変化した画素の [MovingTargets.MIN_SHARE_OF_CHANGE] 以上が枠に入る」か
      * 「前回から中心が [minMove] 以上動き、枠の中の画素も変わっている（[changedInBox]）」で決める。
-     * ぶれた写真では何も動いていなくても枠が撮るたびに 1 割ほど跳ぶので、位置だけでは動いたとしない。
+     * ぶれた写真などでは何も動いていなくても枠が 1 割ほど跳ぶことがあるので、位置だけでは動いたとしない。
      */
     fun update(
         detections: List<DetectedTarget>,
@@ -104,14 +108,15 @@ class TargetTracker(
         shareOfChange: (NormalizedBox) -> Double,
     ): TrackedTarget {
         val movedBy = if (matched) distance(track.box.center, detection.box.center) else 0.0
-        val moving = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE ||
-            (movedBy >= minMove && changedInBox(detection.box))
+        val overlaps = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE
+        val jumped = movedBy >= minMove
+        val moved = jumped && changedInBox(detection.box)
         if (matched) {
             unmatched.remove(track)
             track.box = detection.box
             track.misses = 0
         }
-        return TrackedTarget(track.id, track.kind, track.box, moving)
+        return TrackedTarget(track.id, track.kind, track.box, overlaps || moved, boxJumpOnly = jumped && !moved && !overlaps)
     }
 
     fun clear() {

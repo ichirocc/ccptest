@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 # 静かな回: 動くものが無いと判定した・検出を省いた回。
-QUIET_REASONS = {"no_moving_target", "skipped_no_change", "no_change(no_detection:heat)", "no_change(no_detector)"}
+QUIET_REASONS = {"no_moving_target", "no_moving_target(box_jump)", "skipped_no_change", "no_change(no_detection:heat)", "no_change(no_detector)"}
 # あやしい保存: 撮っている人自身やとなりの人を写したことが多い理由。
 SUSPICIOUS_PREFIXES = ("phone_moved_person:HAND", "phone_moved_person:BODY_PART", "close_subject", "walking")
 

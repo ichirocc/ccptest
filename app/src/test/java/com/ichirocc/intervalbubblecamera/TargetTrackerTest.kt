@@ -34,14 +34,18 @@ class TargetTrackerTest {
         // ぶれた写真: 何も動いていないのに検出の枠だけが跳ぶ。
         val tracker = TargetTracker()
         tracker.update(listOf(person(0.10)), noChange) { false }
-        assertFalse(tracker.update(listOf(person(0.20)), noChange) { false }.single().moving)
+        val target = tracker.update(listOf(person(0.20)), noChange) { false }.single()
+        assertFalse(target.moving)
+        assertTrue("recorded as a box jump", target.boxJumpOnly)
     }
 
     @Test
     fun `a box that moves with change inside is moving`() {
         val tracker = TargetTracker()
         tracker.update(listOf(person(0.10)), noChange) { true }
-        assertTrue(tracker.update(listOf(person(0.20)), noChange) { true }.single().moving)
+        val target = tracker.update(listOf(person(0.20)), noChange) { true }.single()
+        assertTrue(target.moving)
+        assertFalse(target.boxJumpOnly)
     }
 
     @Test

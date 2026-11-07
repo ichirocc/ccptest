@@ -1093,6 +1093,7 @@ class IntervalCaptureService : LifecycleService() {
                 )
                 val target = TargetTracker.focusTarget(tracked)
                 trace.targetKind = target?.kind?.name
+                trace.boxJumpOnly = target == null && tracked.any { it.boxJumpOnly }
                 target?.box
             }.fold(
                 onSuccess = { box ->
@@ -1101,7 +1102,12 @@ class IntervalCaptureService : LifecycleService() {
                         trace.reason = "close_subject"
                         pixelMotion
                     } else if (box == null) {
-                        trace.reason = if (phoneMoved) "phone_moved" else "no_moving_target"
+                        trace.reason = when {
+                            phoneMoved -> "phone_moved"
+                            // 人の枠は跳んだが、枠の中の画素は変わっていなかった（実機でこの決まりが効いた回を数える）。
+                            trace.boxJumpOnly -> "no_moving_target(box_jump)"
+                            else -> "no_moving_target"
+                        }
                         pixelMotion.copy(motionDetected = false, center = null)
                     } else {
                         if (phoneMoved) Log.i(TAG, "Phone moved for $key but a person is in frame; saving")
@@ -1705,6 +1711,7 @@ class IntervalCaptureService : LifecycleService() {
         var targetKind: String? = null
         var motion: Boolean? = null
         var reason = ""
+        var boxJumpOnly = false
         var refocused: Boolean? = null
         var blur: Double? = null
         var blurRetaken: Boolean? = null

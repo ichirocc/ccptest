@@ -271,8 +271,8 @@ object MovingTargets {
 
     /**
      * 枠 [box] の中に、本当に変わった画素があるか（枠の中の格子の [MIN_CHANGED_INSIDE_RATIO] 以上、かつ
-     * [MIN_CHANGED_INSIDE_CELLS] 個以上）。ぶれた写真では何も動いていなくても人の枠が撮るたびに 1 割ほど
-     * 跳ぶので、「人の位置が動いた」は、枠の中の画素も変わっているときだけ数える。
+     * [MIN_CHANGED_INSIDE_CELLS] 個以上）。ぶれた写真などでは何も動いていなくても人の枠が 1 割ほど
+     * 跳ぶことがあるので、「人の位置が動いた」は、枠の中の画素も変わっているときだけ数える。
      */
     fun changedInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Boolean {
         val x0 = (box.left * width).toInt().coerceIn(0, width)
