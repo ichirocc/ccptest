@@ -1,6 +1,7 @@
 package com.ichirocc.intervalbubblecamera
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -78,5 +79,66 @@ class MovingTargetsTest {
     fun `no zoom region for no change or a change over most of the frame`() {
         assertNull(MovingTargets.changedRegion(mask { _, _ -> false }, width, height))
         assertNull(MovingTargets.changedRegion(mask { x, _ -> x < 70 }, width, height))
+    }
+
+    @Test
+    fun `a change spread over the whole frame is not concentrated on a person`() {
+        val box = NormalizedBox(0.25, 0.25, 0.5, 0.75)
+        val everywhere = mask { x, y -> (x + y) % 3 == 0 }
+        assertFalse(MovingTargets.changeConcentratedInside(everywhere, width, height, box))
+        val onPerson = mask { x, y -> x in 20..39 && y in 15..44 && (x + y) % 2 == 0 }
+        assertTrue(MovingTargets.changeConcentratedInside(onPerson, width, height, box))
+        assertFalse(MovingTargets.changeConcentratedInside(mask { _, _ -> false }, width, height, box))
+    }
+
+    @Test
+    fun `a lighting change in one part of the frame disappears once each block is evened out`() {
+        // 右上の 4 分の 1（区画の境目に合わせた範囲）だけ 60 明るくなった。
+        val lit = frame { x, y -> ((x + y) % 150 + 40) + if (x >= 40 && y < 30) 60 else 0 }
+        val plain = FrameAlignment.alignedMask(still, lit, FrameShift.NONE, MotionThreshold.DEFAULT)
+        val evened = FrameAlignment.alignedMask(still, lit, FrameShift.NONE, MotionThreshold.DEFAULT, FrameAlignment.BLOCK_SIZE)
+        assertTrue(plain.count { it } > width * height / 5)
+        assertEquals(0, evened.count { it })
+        // 人が動いた変化は、区画ごとにそろえても残る（人の形は区画の境目にそろわない）。
+        val person = frame { x, y -> if (x in 12..17 && y in 22..47) 250 else (x + y) % 150 + 40 }
+        val evenedPerson = FrameAlignment.alignedMask(still, person, FrameShift.NONE, MotionThreshold.DEFAULT, FrameAlignment.BLOCK_SIZE)
+        assertTrue(evenedPerson.count { it } > 0)
+    }
+
+    @Test
+    fun `the motion grid averages every pixel in each cell`() {
+        // 160×120 の画像を 80×60 に: 格子 1 つに 2×2 画素。白と黒の市松模様は灰色になる。
+        val w = 160
+        val h = 120
+        val white = (0xFF shl 24) or 0xFFFFFF
+        val black = 0xFF shl 24
+        val argb = IntArray(w * h) { if ((it % w + it / w) % 2 == 0) white else black }
+        val grid = MotionDetector.gridFromArgb(argb, w, h)
+        assertEquals(MotionDetector.GRID_WIDTH, grid.width)
+        assertTrue(grid.pixels.all { it in 125..130 })
+        // 1 画素ずらしても、平均した値はほとんど変わらない（点で取ると白と黒が入れ替わる）。
+        val shifted = IntArray(w * h) { if ((it % w + it / w + 1) % 2 == 0) white else black }
+        val grid2 = MotionDetector.gridFromArgb(shifted, w, h)
+        assertTrue(grid.pixels.indices.all { kotlin.math.abs(grid.pixels[it] - grid2.pixels[it]) <= 1 })
+    }
+
+    @Test
+    fun `changed inside needs one percent of the box and at least two cells`() {
+        val w = 80
+        val h = 60
+        val box = NormalizedBox(0.0, 0.0, 0.5, 0.5) // 40 x 30 = 1200 cells, so 12 are needed
+        val mask = BooleanArray(w * h)
+        assertFalse(MovingTargets.changedInside(mask, w, h, box))
+        for (x in 0 until 11) mask[x] = true
+        assertFalse(MovingTargets.changedInside(mask, w, h, box))
+        mask[11] = true
+        assertTrue(MovingTargets.changedInside(mask, w, h, box))
+
+        val small = NormalizedBox(0.5, 0.5, 0.55, 0.55) // 4 x 3 cells, so 2 are needed
+        val cell = 30 * w + 40
+        mask[cell] = true
+        assertFalse(MovingTargets.changedInside(mask, w, h, small))
+        mask[cell + 1] = true
+        assertTrue(MovingTargets.changedInside(mask, w, h, small))
     }
 }

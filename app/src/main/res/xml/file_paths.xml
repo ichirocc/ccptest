@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「記録を送る」で共有する、実機で確かめるための記録（アプリ専用の場所の dogfood フォルダ）だけを公開する。 -->
+<paths>
+    <files-path name="dogfood" path="dogfood/" />
+</paths>

@@ -22,12 +22,16 @@ data class DetectedTarget(val box: NormalizedBox, val kind: TargetKind, val scor
     val confident: Boolean get() = score >= TargetTracker.HIGH_SCORE
 }
 
-/** 追跡中の対象。[moving] はこの回に動いたと判定されたか。 */
+/**
+ * 追跡中の対象。[moving] はこの回に動いたと判定されたか。[boxJumpOnly] は、位置は動いたが枠の中の画素が
+ * 変わっていなかったので動いたとしなかったか（検証用の記録に残す）。
+ */
 data class TrackedTarget(
     val id: Int,
     val kind: TargetKind,
     val box: NormalizedBox,
     val moving: Boolean,
+    val boxJumpOnly: Boolean = false,
 )
 
 /**
@@ -54,9 +58,14 @@ class TargetTracker(
     /**
      * 今回の検出で追跡を更新し、今回見えている対象を返す。動いたかどうかは
      * 「変化した画素の [MovingTargets.MIN_SHARE_OF_CHANGE] 以上が枠に入る」か
-     * 「前回から中心が [minMove] 以上動いた」で決める。
+     * 「前回から中心が [minMove] 以上動き、枠の中の画素も変わっている（[changedInBox]）」で決める。
+     * ぶれた写真などでは何も動いていなくても枠が 1 割ほど跳ぶことがあるので、位置だけでは動いたとしない。
      */
-    fun update(detections: List<DetectedTarget>, shareOfChange: (NormalizedBox) -> Double): List<TrackedTarget> {
+    fun update(
+        detections: List<DetectedTarget>,
+        shareOfChange: (NormalizedBox) -> Double,
+        changedInBox: (NormalizedBox) -> Boolean = { true },
+    ): List<TrackedTarget> {
         val unmatched = tracks.toMutableList()
         val seen = mutableListOf<TrackedTarget>()
         val (high, low) = detections.partition { it.confident }
@@ -70,7 +79,7 @@ class TargetTracker(
                 .maxByOrNull { it.second }
                 ?.first
             val track = match ?: Track(nextId++, detection.kind, detection.box, 0).also { tracks.add(it) }
-            seen.add(follow(track, detection, matched = match != null, unmatched, shareOfChange))
+            seen.add(follow(track, detection, matched = match != null, unmatched, changedInBox, shareOfChange))
         }
 
         // 2 段目: 確からしさの低い検出は、1 段目で見つからなかった対象と枠がよく重なるときだけ使う。
@@ -81,7 +90,7 @@ class TargetTracker(
                 .filter { it.second >= LOW_SCORE_MATCH_IOU }
                 .maxByOrNull { it.second }
                 ?.first ?: continue
-            seen.add(follow(match, detection, matched = true, unmatched, shareOfChange))
+            seen.add(follow(match, detection, matched = true, unmatched, changedInBox, shareOfChange))
         }
 
         unmatched.forEach { it.misses++ }
@@ -95,16 +104,19 @@ class TargetTracker(
         detection: DetectedTarget,
         matched: Boolean,
         unmatched: MutableList<Track>,
+        changedInBox: (NormalizedBox) -> Boolean,
         shareOfChange: (NormalizedBox) -> Double,
     ): TrackedTarget {
         val movedBy = if (matched) distance(track.box.center, detection.box.center) else 0.0
-        val moving = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE || movedBy >= minMove
+        val overlaps = shareOfChange(detection.box) >= MovingTargets.MIN_SHARE_OF_CHANGE
+        val jumped = movedBy >= minMove
+        val moved = jumped && changedInBox(detection.box)
         if (matched) {
             unmatched.remove(track)
             track.box = detection.box
             track.misses = 0
         }
-        return TrackedTarget(track.id, track.kind, track.box, moving)
+        return TrackedTarget(track.id, track.kind, track.box, overlaps || moved, boxJumpOnly = jumped && !moved && !overlaps)
     }
 
     fun clear() {
@@ -132,7 +144,11 @@ class TargetTracker(
     companion object {
         const val MIN_IOU = 0.1
         const val MAX_CENTER_DISTANCE = 0.2
-        const val MIN_MOVE = 0.03
+        /**
+         * 人の位置がこれ以上動いたら「動いた」とみなす（広角）。実機の写真で確かめると、何も動いていなくても
+         * 検出した枠は撮るたびに 3% ほどゆれるので、それより大きくする。
+         */
+        const val MIN_MOVE = 0.04
 
         /** これ以上の確からしさの検出は、それだけで対象として数える（物体検出のこれまでの閾値）。 */
         const val HIGH_SCORE = 0.4

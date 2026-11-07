@@ -120,6 +120,17 @@
             </intent-filter>
         </activity-alias>
 
+        <!-- 「記録を送る」で記録のファイルを他のアプリ（メール・ドライブなど）へ渡すため。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <service
             android:name=".capture.IntervalCaptureService"
             android:exported="false"
