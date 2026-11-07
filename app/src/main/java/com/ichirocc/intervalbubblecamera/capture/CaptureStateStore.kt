@@ -23,7 +23,7 @@ data class CaptureUiState(
     /** 検出に使っている機種設定と実行先（例: 「Pixel 10 Pro XL・物体 GPU / 姿勢 GPU / 手 CPU」）。 */
     val detectorSummary: String? = null,
     val failedCameras: List<String> = emptyList(),
-    val detail: String = "設定後に撮影を開始してください。",
+    val detail: String = "① と ② を えらんで、「スタート」を おしてね。",
 ) {
     val isActive: Boolean
         get() = phase == CapturePhase.STARTING || phase == CapturePhase.RUNNING
@@ -40,7 +40,7 @@ object CaptureStateStore {
         mutableState.value = CaptureUiState(
             phase = CapturePhase.STARTING,
             intervalSeconds = intervalSeconds,
-            detail = "カメラを準備しています…",
+            detail = "カメラの じゅんびを しています…",
         )
     }
 
@@ -53,7 +53,7 @@ object CaptureStateStore {
             phase = CapturePhase.RUNNING,
             photoCount = it.photoCount + fileNames.size,
             lastPhotoName = fileNames.joinToString(" / "),
-            detail = "動体を検知して${fileNames.size}枚保存しました（見送り${it.skippedCount}回）。",
+            detail = "動きを 見つけたので、写真を ${fileNames.size}枚 のこしました。",
         )
     }
 
@@ -65,18 +65,19 @@ object CaptureStateStore {
     fun markMotionBaseline() = mutableState.update {
         it.copy(
             phase = CapturePhase.RUNNING,
-            detail = "比較用の最初の画像を取得しました。次の撮影から動体を検知します。",
+            detail = "1回目は くらべるための写真です。つぎから 動きを さがします。",
         )
     }
 
     fun markNoMotion(changedRatio: Double, phoneMoved: Boolean = false) {
-        val reason = if (phoneMoved) "スマホが動いたため" else "動体なしのため"
+        val reason = if (phoneMoved) "スマホが 動いたので" else "動きが なかったので"
         mutableState.update {
             val skipped = it.skippedCount + 1
             it.copy(
                 phase = CapturePhase.RUNNING,
                 skippedCount = skipped,
-                detail = "${reason}保存を見送りました（変化${"%.1f".format(changedRatio * 100)}%・見送り${skipped}回）。",
+                // 小学生にも分かる言葉で出す。変化の割合（changedRatio）はくわしい情報向けなので出さない。
+                detail = "${reason}、写真は のこしませんでした。",
             )
         }
     }
@@ -95,7 +96,7 @@ object CaptureStateStore {
         it.copy(phase = CapturePhase.RUNNING, detail = message)
     }
 
-    fun markStopped(detail: String = "撮影を停止しました。") = mutableState.update {
+    fun markStopped(detail: String = "とるのを やめました。") = mutableState.update {
         it.copy(phase = CapturePhase.IDLE, detail = detail)
     }
 }
