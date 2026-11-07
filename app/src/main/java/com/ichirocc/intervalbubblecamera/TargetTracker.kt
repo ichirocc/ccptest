@@ -132,7 +132,11 @@ class TargetTracker(
     companion object {
         const val MIN_IOU = 0.1
         const val MAX_CENTER_DISTANCE = 0.2
-        const val MIN_MOVE = 0.03
+        /**
+         * 人の位置がこれ以上動いたら「動いた」とみなす（広角）。実機の写真で確かめると、何も動いていなくても
+         * 検出した枠は撮るたびに 3% ほどゆれるので、それより大きくする。
+         */
+        const val MIN_MOVE = 0.04
 
         /** これ以上の確からしさの検出は、それだけで対象として数える（物体検出のこれまでの閾値）。 */
         const val HIGH_SCORE = 0.4

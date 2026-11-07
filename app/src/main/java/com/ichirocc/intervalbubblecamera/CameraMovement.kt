@@ -33,7 +33,13 @@ object CameraMovement {
      * スマホが止まっていると分かっているとき、画面のこの割合以上が変われば、人の検出に頼らず保存する。
      * スマホの上を人がまたぐなど、すぐ近くを人が覆うと、真下・真横からの姿は検出できないことが多いため。
      */
-    const val CLOSE_SUBJECT_RATIO = 0.3
+    const val CLOSE_SUBJECT_RATIO = 0.15
+
+    /**
+     * 区画ごとに明るさをそろえても、画面のこの割合以上が変わっていること（照明が一部だけ変わったのではない）。
+     * 実機の写真で確かめると、照明の変化は明るさをそろえると 2% 前後まで消え、本物の布で覆ったときは残った。
+     */
+    const val CLOSE_SUBJECT_UNEVEN_RATIO = 0.10
 
     /** 2 つの重力の向き（加速度 [x, y, z]）の間の角度（度）。 */
     fun tiltDegrees(a: FloatArray, b: FloatArray): Double {
@@ -80,8 +86,8 @@ object CameraMovement {
     ): Boolean = judge(rotationDegrees, changedRatio, tiltDegrees, lyingFlat) == PhoneMotion.MOVED
 
     /** スマホが止まっていると分かっていて、すぐ近くを何か（人）が覆ったように画面が大きく変わったか。 */
-    fun closeSubject(motion: PhoneMotion, changedRatio: Double): Boolean =
-        motion == PhoneMotion.STILL && changedRatio >= CLOSE_SUBJECT_RATIO
+    fun closeSubject(motion: PhoneMotion, changedRatio: Double, unevenRatio: Double): Boolean =
+        motion == PhoneMotion.STILL && changedRatio >= CLOSE_SUBJECT_RATIO && unevenRatio >= CLOSE_SUBJECT_UNEVEN_RATIO
 
     private fun norm(v: FloatArray): Double =
         Math.sqrt(v[0].toDouble() * v[0] + v[1].toDouble() * v[1] + v[2].toDouble() * v[2])

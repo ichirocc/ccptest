@@ -969,15 +969,38 @@ class IntervalCaptureService : LifecycleService() {
         // スマホが動いた回は画面全体がずれるので、前回の画像を同じだけずらして重ねてから比べる（手ぶれ補正と同じ）。
         // 重ねられれば、スマホが止まっているときと同じように判定し、追跡中の位置も同じだけずらして続ける。
         val compensation = if (phoneMotion == PhoneMotion.MOVED) compensateShift(reference, shot.frame) else null
-        val pixelMotion = compensation?.motion ?: rawMotion
+        // スマホが止まっている扱い（ジャイロで 2° 未満）でも、手ぶれで画面が 1〜2 格子ずれることがあるので、
+        // その範囲だけ重ね直して比べる（実機の写真で確かめると、1〜2° の手ぶれで変わる画素が 20〜40% から 0.5% 以下に
+        // 減った）。追跡中の位置はずらさない（確かめると、ずらしても結果は変わらなかった）。
+        val steadyShift = if (phoneMotion != PhoneMotion.MOVED) {
+            FrameAlignment.estimate(reference, shot.frame, FrameAlignment.STEADY_MAX_SHIFT)
+        } else {
+            FrameShift.NONE
+        }
+        val comparedShift = compensation?.shift ?: steadyShift
+        val comparedThreshold = compensation?.threshold ?: threshold
+        val pixelMotion = compensation?.motion ?: if (steadyShift != FrameShift.NONE) {
+            FrameAlignment.compareAligned(reference, shot.frame, steadyShift, threshold)
+        } else {
+            rawMotion
+        }
+        // 区画ごとに明るさをそろえて比べた変化。照明が一部だけ変わったときの変化は消え、人の動きや、すぐ近くを
+        // 覆ったものは残る。人に変化が重なったかと、近くを覆ったかの判定に使う。
+        val unevenMask = FrameAlignment.alignedMask(reference, shot.frame, comparedShift, comparedThreshold, FrameAlignment.BLOCK_SIZE)
+        val unevenRatio = FrameAlignment.changedRatio(unevenMask, shot.frame.width, shot.frame.height, comparedShift)
         trace.changedRatio = pixelMotion.changedRatio
-        trace.compensatedShift = compensation?.let { "${it.shift.dx}/${it.shift.dy}" } ?: ""
+        // 重ね直したずれ（スマホが動いた回は "moved:"、止まっている扱いの手ぶれは "steady:"）と、明るさをそろえた変化。
+        trace.compensatedShift = when {
+            compensation != null -> "moved:${comparedShift.dx}/${comparedShift.dy}"
+            steadyShift != FrameShift.NONE -> "steady:${comparedShift.dx}/${comparedShift.dy}"
+            else -> ""
+        } + " uneven=" + String.format(java.util.Locale.US, "%.4f", unevenRatio)
         // 重ねきれないほど動いた回は、画像の変化や位置の移動では判定しない。ただし人（全身・体の一部・手）が
         // 写っていれば保存する。追跡中の位置も画面ごとずれるため、追跡はやり直す。
         val phoneMoved = phoneMotion == PhoneMotion.MOVED && compensation == null
         // スマホが止まっていて画面の大部分が変わったら、すぐ近くを人が覆った（スマホの上を人がまたいだなど）と
         // みなし、人を検出できなくても保存する。真下や真横から見た人は検出できないことが多いため。
-        val closeSubject = CameraMovement.closeSubject(phoneMotion, rawMotion.changedRatio)
+        val closeSubject = CameraMovement.closeSubject(phoneMotion, pixelMotion.changedRatio, unevenRatio)
         if (compensation != null) {
             Log.i(TAG, "Phone moved for $key; compensated ${compensation.shift} (change=${pixelMotion.changedRatio})")
             tracker.shift(
@@ -1042,7 +1065,7 @@ class IntervalCaptureService : LifecycleService() {
                     trace.targetKind = person?.kind?.name
                     return@runCatching person?.box
                 }
-                val mask = compensation?.mask ?: MovingTargets.changedMask(reference, shot.frame, threshold)
+                val mask = compensation?.mask ?: FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
                 if (pixelMotion.motionDetected) {
                     val before = detections.size
                     detections = withZoomedDetections(key, detector, shot, mask, detections, allOrientations)
@@ -1054,8 +1077,12 @@ class IntervalCaptureService : LifecycleService() {
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
                 // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(detections) { box ->
-                    if (pixelMotion.motionDetected) {
-                        MovingTargets.shareOfChangeInside(mask, shot.frame.width, shot.frame.height, box)
+                    // 変化がその人の枠に集まっているときだけ、人に変化が重なったとみなす（照明の変化や手ぶれは画面じゅうに
+                    // 広がる）。区画ごとに明るさをそろえた変化で見る。
+                    val w = shot.frame.width
+                    val h = shot.frame.height
+                    if (pixelMotion.motionDetected && MovingTargets.changeConcentratedInside(unevenMask, w, h, box)) {
+                        MovingTargets.shareOfChangeInside(unevenMask, w, h, box)
                     } else {
                         0.0
                     }
@@ -1112,7 +1139,12 @@ class IntervalCaptureService : LifecycleService() {
     }
 
     /** スマホの動きを打ち消した比べ方の結果。 */
-    private class ShiftCompensation(val shift: FrameShift, val motion: MotionResult, val mask: BooleanArray)
+    private class ShiftCompensation(
+        val shift: FrameShift,
+        val motion: MotionResult,
+        val mask: BooleanArray,
+        val threshold: MotionThreshold,
+    )
 
     /**
      * 画面全体のずれを求めて打ち消す。打ち消しきれない（大きく動いた・その場で回した）ときは null。
@@ -1124,7 +1156,7 @@ class IntervalCaptureService : LifecycleService() {
         val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
         val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold))
+        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold), threshold)
     }
 
     /**

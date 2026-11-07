@@ -65,7 +65,7 @@ class CameraMovementTest {
     fun `a person stepping over a flat phone without a gyroscope is not phone movement`() {
         val motion = CameraMovement.judge(rotationDegrees = null, changedRatio = 0.8, tiltDegrees = 0.2, lyingFlat = true)
         assertEquals(PhoneMotion.STILL, motion)
-        assertTrue(CameraMovement.closeSubject(motion, changedRatio = 0.8))
+        assertTrue(CameraMovement.closeSubject(motion, changedRatio = 0.8, unevenRatio = 0.6))
     }
 
     @Test
@@ -78,9 +78,16 @@ class CameraMovementTest {
 
     @Test
     fun `a large change is saved without detection only when the phone is known to be still`() {
-        assertTrue(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.35))
-        assertFalse(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.1))
-        assertFalse(CameraMovement.closeSubject(PhoneMotion.UNKNOWN, changedRatio = 0.4))
-        assertFalse(CameraMovement.closeSubject(PhoneMotion.MOVED, changedRatio = 0.9))
+        // 実機の写真で確かめた値: 本物の布で画面の 25% を覆うと変化は 15〜19%。
+        assertTrue(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.17, unevenRatio = 0.15))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.1, unevenRatio = 0.1))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.UNKNOWN, changedRatio = 0.4, unevenRatio = 0.4))
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.MOVED, changedRatio = 0.9, unevenRatio = 0.9))
+    }
+
+    @Test
+    fun `a lighting change in part of the frame is not something close`() {
+        // 照明が画面の一部だけ変わると、変化は 19〜24% あるが、区画ごとに明るさをそろえると 2% 前後に消える。
+        assertFalse(CameraMovement.closeSubject(PhoneMotion.STILL, changedRatio = 0.24, unevenRatio = 0.02))
     }
 }
