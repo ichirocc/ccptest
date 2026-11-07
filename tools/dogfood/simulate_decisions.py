@@ -233,7 +233,13 @@ def decide(prev_img, cur_img, prev_det, cur_det, preset, new_rules):
             overlaps = motion and concentrated(uneven, box) and share_inside(uneven, box) >= 0.1
         else:
             overlaps = motion and share_inside(m, box) >= 0.1
-        if overlaps or moved >= min_move:
+        if new_rules:
+            # 位置が動いても、枠の中の画素が変わっていなければ数えない（ぶれた写真で枠だけが跳ぶ）。
+            cells = _cells(uneven, box)
+            moved_enough = moved >= min_move and cells.size > 0 and cells.sum() >= max(2, 0.01 * cells.size)
+        else:
+            moved_enough = moved >= min_move
+        if overlaps or moved_enough:
             return True, f"動く{kind}（{'変化が重なる' if overlaps else f'位置が {moved:.3f} 動いた'}）"
     close_ratio = ratio if new_rules else raw
     if close_ratio >= close and (not new_rules or uneven_ratio >= 0.10):

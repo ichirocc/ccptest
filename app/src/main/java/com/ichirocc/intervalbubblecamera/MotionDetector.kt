@@ -262,12 +262,34 @@ object MovingTargets {
         val y1 = Math.ceil(box.bottom * height).toInt().coerceIn(0, height)
         val insideCells = (x1 - x0) * (y1 - y0)
         if (insideCells <= 0) return false
-        val inside = changedInside(mask, width, height, box)
+        val inside = countInside(mask, width, height, box)
         val outsideCells = width * height - insideCells
         val densityInside = inside.toDouble() / insideCells
         val densityOutside = if (outsideCells > 0) (total - inside).toDouble() / outsideCells else 0.0
         return densityInside >= MIN_CONCENTRATION * densityOutside
     }
+
+    /**
+     * 枠 [box] の中に、本当に変わった画素があるか（枠の中の格子の [MIN_CHANGED_INSIDE_RATIO] 以上、かつ
+     * [MIN_CHANGED_INSIDE_CELLS] 個以上）。ぶれた写真では何も動いていなくても人の枠が撮るたびに 1 割ほど
+     * 跳ぶので、「人の位置が動いた」は、枠の中の画素も変わっているときだけ数える。
+     */
+    fun changedInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Boolean {
+        val x0 = (box.left * width).toInt().coerceIn(0, width)
+        val x1 = Math.ceil(box.right * width).toInt().coerceIn(0, width)
+        val y0 = (box.top * height).toInt().coerceIn(0, height)
+        val y1 = Math.ceil(box.bottom * height).toInt().coerceIn(0, height)
+        val cells = (x1 - x0) * (y1 - y0)
+        if (cells <= 0) return false
+        val needed = maxOf(MIN_CHANGED_INSIDE_CELLS.toDouble(), cells * MIN_CHANGED_INSIDE_RATIO)
+        return countInside(mask, width, height, box) >= needed
+    }
+
+    /** [changedInside] の、枠の中の格子に対する割合。 */
+    const val MIN_CHANGED_INSIDE_RATIO = 0.01
+
+    /** [changedInside] の、最小の数。 */
+    const val MIN_CHANGED_INSIDE_CELLS = 2
 
     /** [changeConcentratedInside] の倍率。 */
     const val MIN_CONCENTRATION = 2.0
@@ -276,10 +298,10 @@ object MovingTargets {
     fun shareOfChangeInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Double {
         val totalChanged = mask.count { it }
         if (totalChanged == 0) return 0.0
-        return changedInside(mask, width, height, box).toDouble() / totalChanged
+        return countInside(mask, width, height, box).toDouble() / totalChanged
     }
 
-    private fun changedInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Int {
+    private fun countInside(mask: BooleanArray, width: Int, height: Int, box: NormalizedBox): Int {
         val x0 = (box.left * width).toInt().coerceIn(0, width)
         val x1 = Math.ceil(box.right * width).toInt().coerceIn(0, width)
         val y0 = (box.top * height).toInt().coerceIn(0, height)

@@ -1060,7 +1060,7 @@ class IntervalCaptureService : LifecycleService() {
                 trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
                 if (phoneMoved) {
                     // 追跡をこの回の位置から始め直し、写っている人がいればその枠を返す。
-                    tracker.update(detections) { 0.0 }
+                    tracker.update(detections, shareOfChange = { 0.0 })
                     val person = TargetTracker.personInFrame(detections)
                     trace.targetKind = person?.kind?.name
                     return@runCatching person?.box
@@ -1075,18 +1075,22 @@ class IntervalCaptureService : LifecycleService() {
                     trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
                 }
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
-                // 届かなくても、人の位置が前回から動いていれば動きとする（ゆっくりした動き・遠くの人）。
-                val tracked = tracker.update(detections) { box ->
-                    // 変化がその人の枠に集まっているときだけ、人に変化が重なったとみなす（照明の変化や手ぶれは画面じゅうに
-                    // 広がる）。区画ごとに明るさをそろえた変化で見る。
-                    val w = shot.frame.width
-                    val h = shot.frame.height
-                    if (pixelMotion.motionDetected && MovingTargets.changeConcentratedInside(unevenMask, w, h, box)) {
-                        MovingTargets.shareOfChangeInside(unevenMask, w, h, box)
-                    } else {
-                        0.0
-                    }
-                }
+                // 届かなくても、人の位置が前回から動き、枠の中の画素も変わっていれば動きとする（ゆっくりした動き・遠くの人）。
+                val tracked = tracker.update(
+                    detections,
+                    changedInBox = { box -> MovingTargets.changedInside(unevenMask, shot.frame.width, shot.frame.height, box) },
+                    shareOfChange = { box ->
+                        // 変化がその人の枠に集まっているときだけ、人に変化が重なったとみなす（照明の変化や手ぶれは画面じゅうに
+                        // 広がる）。区画ごとに明るさをそろえた変化で見る。
+                        val w = shot.frame.width
+                        val h = shot.frame.height
+                        if (pixelMotion.motionDetected && MovingTargets.changeConcentratedInside(unevenMask, w, h, box)) {
+                            MovingTargets.shareOfChangeInside(unevenMask, w, h, box)
+                        } else {
+                            0.0
+                        }
+                    },
+                )
                 val target = TargetTracker.focusTarget(tracked)
                 trace.targetKind = target?.kind?.name
                 target?.box

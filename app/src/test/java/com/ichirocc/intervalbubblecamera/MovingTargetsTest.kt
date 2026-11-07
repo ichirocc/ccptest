@@ -121,4 +121,24 @@ class MovingTargetsTest {
         val grid2 = MotionDetector.gridFromArgb(shifted, w, h)
         assertTrue(grid.pixels.indices.all { kotlin.math.abs(grid.pixels[it] - grid2.pixels[it]) <= 1 })
     }
+
+    @Test
+    fun `changed inside needs one percent of the box and at least two cells`() {
+        val w = 80
+        val h = 60
+        val box = NormalizedBox(0.0, 0.0, 0.5, 0.5) // 40 x 30 = 1200 cells, so 12 are needed
+        val mask = BooleanArray(w * h)
+        assertFalse(MovingTargets.changedInside(mask, w, h, box))
+        for (x in 0 until 11) mask[x] = true
+        assertFalse(MovingTargets.changedInside(mask, w, h, box))
+        mask[11] = true
+        assertTrue(MovingTargets.changedInside(mask, w, h, box))
+
+        val small = NormalizedBox(0.5, 0.5, 0.55, 0.55) // 4 x 3 cells, so 2 are needed
+        val cell = 30 * w + 40
+        mask[cell] = true
+        assertFalse(MovingTargets.changedInside(mask, w, h, small))
+        mask[cell + 1] = true
+        assertTrue(MovingTargets.changedInside(mask, w, h, small))
+    }
 }
