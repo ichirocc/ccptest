@@ -50,6 +50,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var detailToggleButton: MaterialButton
     private lateinit var detailSettings: LinearLayout
     private lateinit var intervalValue: TextView
+    private lateinit var intervalHint: TextView
     private lateinit var intervalSeekBar: SeekBar
     private lateinit var motionPixelValue: TextView
     private lateinit var motionPixelSeekBar: SeekBar
@@ -161,6 +162,7 @@ class MainActivity : AppCompatActivity() {
         detailToggleButton = findViewById(R.id.detailToggleButton)
         detailSettings = findViewById(R.id.detailSettings)
         intervalValue = findViewById(R.id.intervalValue)
+        intervalHint = findViewById(R.id.intervalHint)
         intervalSeekBar = findViewById(R.id.intervalSeekBar)
         motionPixelValue = findViewById(R.id.motionPixelValue)
         motionPixelSeekBar = findViewById(R.id.motionPixelSeekBar)
@@ -190,10 +192,7 @@ class MainActivity : AppCompatActivity() {
             IntervalPolicy.DEFAULT_SECONDS,
         )
         intervalSeekBar.progress = IntervalPolicy.seekProgressFromSeconds(savedInterval)
-        intervalValue.text = getString(
-            R.string.interval_seconds,
-            IntervalPolicy.clampSeconds(savedInterval),
-        )
+        renderInterval(IntervalPolicy.clampSeconds(savedInterval))
 
         val savedThreshold = MotionThreshold.clamped(
             preferences.getInt(KEY_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
@@ -218,7 +217,7 @@ class MainActivity : AppCompatActivity() {
         intervalSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 val seconds = IntervalPolicy.secondsFromSeekProgress(progress)
-                intervalValue.text = getString(R.string.interval_seconds, seconds)
+                renderInterval(seconds)
                 if (fromUser) {
                     preferences.edit { putInt(KEY_INTERVAL_SECONDS, seconds) }
                     if (!applyingPreset) renderPreset(currentPreset())
@@ -401,10 +400,44 @@ class MainActivity : AppCompatActivity() {
         MotionThreshold.areaFromProgress(motionAreaSeekBar.progress),
     )
 
+    /**
+     * くわしい設定の数を、どうなるかが分かることばで出す（数はかっこの中に小さく添える）。
+     * 例: 「ふつう（28）」「小さな ところでも（1.0%）」。
+     */
     private fun renderMotionThreshold() {
         val threshold = selectedMotionThreshold()
-        motionPixelValue.text = threshold.pixelThreshold.toString()
-        motionAreaValue.text = MotionThreshold.formatAreaPercent(threshold.areaPermille)
+        val sensitivity = getString(
+            when (SettingWords.sensitivityOf(threshold.pixelThreshold)) {
+                SettingWords.Sensitivity.VERY_SENSITIVE -> R.string.sensitivity_very_sensitive
+                SettingWords.Sensitivity.SENSITIVE -> R.string.sensitivity_sensitive
+                SettingWords.Sensitivity.NORMAL -> R.string.sensitivity_normal
+                SettingWords.Sensitivity.DULL -> R.string.sensitivity_dull
+                SettingWords.Sensitivity.VERY_DULL -> R.string.sensitivity_very_dull
+            },
+        )
+        motionPixelValue.text = getString(R.string.sensitivity_value, sensitivity, threshold.pixelThreshold)
+        val area = getString(
+            when (SettingWords.areaSizeOf(threshold.areaPermille)) {
+                SettingWords.AreaSize.TINY -> R.string.area_tiny
+                SettingWords.AreaSize.SMALL -> R.string.area_small
+                SettingWords.AreaSize.PART -> R.string.area_part
+                SettingWords.AreaSize.WIDE -> R.string.area_wide
+            },
+        )
+        motionAreaValue.text = getString(R.string.area_value, area, MotionThreshold.formatAreaPercent(threshold.areaPermille))
+    }
+
+    /** 何秒ごとに撮るかと、1 時間に撮るおよその回数・電池の減り方を出す。 */
+    private fun renderInterval(seconds: Int) {
+        intervalValue.text = getString(R.string.interval_seconds, seconds)
+        val battery = getString(
+            when (SettingWords.batteryOf(seconds)) {
+                SettingWords.Battery.DRAINS_FAST -> R.string.battery_drains_fast
+                SettingWords.Battery.NORMAL -> R.string.battery_normal
+                SettingWords.Battery.LASTS_LONG -> R.string.battery_lasts_long
+            },
+        )
+        intervalHint.text = getString(R.string.interval_hint, SettingWords.shotsPerHour(seconds), battery)
     }
 
     private fun saveMotionThreshold(threshold: MotionThreshold) {
