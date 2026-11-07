@@ -44,6 +44,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lastPhoto: TextView
     private lateinit var cameraInfo: TextView
     private lateinit var technicalToggleButton: MaterialButton
+    private lateinit var dogfoodPanel: LinearLayout
+    private lateinit var dogfoodCheckBox: android.widget.CheckBox
+    private lateinit var dogfoodShareButton: MaterialButton
     private lateinit var failedCameras: TextView
     private lateinit var presetButtons: Map<CapturePreset, RadioButton>
     private lateinit var presetDescription: TextView
@@ -150,6 +153,9 @@ class MainActivity : AppCompatActivity() {
         lastPhoto = findViewById(R.id.lastPhoto)
         cameraInfo = findViewById(R.id.cameraInfo)
         technicalToggleButton = findViewById(R.id.technicalToggleButton)
+        dogfoodPanel = findViewById(R.id.dogfoodPanel)
+        dogfoodCheckBox = findViewById(R.id.dogfoodCheckBox)
+        dogfoodShareButton = findViewById(R.id.dogfoodShareButton)
         failedCameras = findViewById(R.id.failedCameras)
         presetButtons = linkedMapOf(
             CapturePreset.STANDARD to findViewById(R.id.presetStandard),
@@ -207,6 +213,8 @@ class MainActivity : AppCompatActivity() {
         renderPreset(preset)
         setDetailsVisible(preset == CapturePreset.CUSTOM)
 
+        dogfoodCheckBox.isChecked = preferences.getBoolean(KEY_DOGFOOD_LOG, true)
+
         selectedIconColor = AppIconColor.fromStorageKey(
             preferences.getString(KEY_ICON_COLOR, AppIconColor.DEFAULT.storageKey),
         )
@@ -247,6 +255,10 @@ class MainActivity : AppCompatActivity() {
             button.setOnClickListener { selectPreset(preset) }
         }
         detailToggleButton.setOnClickListener { setDetailsVisible(!detailSettings.isVisible) }
+        dogfoodCheckBox.setOnCheckedChangeListener { _, checked ->
+            preferences.edit { putBoolean(KEY_DOGFOOD_LOG, checked) }
+        }
+        dogfoodShareButton.setOnClickListener { shareDogfoodLog() }
         technicalToggleButton.setOnClickListener {
             technicalVisible = !technicalVisible
             technicalToggleButton.text = getString(if (technicalVisible) R.string.technical_hide else R.string.technical_show)
@@ -309,7 +321,10 @@ class MainActivity : AppCompatActivity() {
         } ?: getString(R.string.last_photo_none)
         cameraInfo.text = listOfNotNull(state.cameraSummary, state.detectorSummary).joinToString("\n")
         cameraInfo.isVisible = technicalVisible && cameraInfo.text.isNotEmpty()
-        technicalToggleButton.isVisible = cameraInfo.text.isNotEmpty() || state.failedCameras.isNotEmpty()
+        // くわしい情報には、検証用の記録の切り替えと「記録を送る」もあるので、いつでも開けるようにする。
+        technicalToggleButton.isVisible = true
+        dogfoodPanel.isVisible = technicalVisible
+        dogfoodCheckBox.isEnabled = !state.isActive
         failedCameras.text = getString(R.string.failed_cameras, state.failedCameras.joinToString())
         failedCameras.isVisible = technicalVisible && state.isActive && state.failedCameras.isNotEmpty()
 
@@ -447,6 +462,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 実機で確かめるための記録（CSV）を、メール・ドライブなど他のアプリへ送る。 */
+    private fun shareDogfoodLog() {
+        val files = com.ichirocc.intervalbubblecamera.capture.DogfoodLog.files(this)
+        if (files.isEmpty()) {
+            Toast.makeText(this, R.string.dogfood_share_empty, Toast.LENGTH_LONG).show()
+            return
+        }
+        val uris = ArrayList(files.map { androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", it) })
+        val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = "text/csv"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(send, getString(R.string.dogfood_share_title)))
+    }
+
     private fun beginStartFlow() {
         pendingStart = true
         continueStartFlow()
@@ -484,6 +515,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(IntervalCaptureService.EXTRA_ICON_COLOR, selectedIconColor.storageKey)
             putExtra(IntervalCaptureService.EXTRA_MOTION_PIXEL_THRESHOLD, motionThreshold.pixelThreshold)
             putExtra(IntervalCaptureService.EXTRA_MOTION_AREA_PERMILLE, motionThreshold.areaPermille)
+            putExtra(IntervalCaptureService.EXTRA_DOGFOOD_LOG, dogfoodCheckBox.isChecked)
         }
 
         runCatching {
@@ -616,5 +648,6 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_ICON_COLOR = "icon_color"
         private const val KEY_MOTION_PIXEL_THRESHOLD = "motion_pixel_threshold"
         private const val KEY_MOTION_AREA_PERMILLE = "motion_area_permille"
+        private const val KEY_DOGFOOD_LOG = "dogfood_log"
     }
 }

@@ -41,6 +41,13 @@ object MotionFrameSampler {
         return resized
     }
 
+    /** JPEG の幅と高さ（画素。中身は読み込まず、見出しだけ読む）。読めなければ null。 */
+    fun size(jpeg: ByteArray): Pair<Int, Int>? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+        return if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth to bounds.outHeight else null
+    }
+
     /** 読み込んだ画像の長辺が、ほしい大きさのこの倍を超えたら縮める。 */
     private const val MAX_OVERSIZE = 1.25
 
