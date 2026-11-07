@@ -53,6 +53,8 @@
 - 撮影ごとの行（`kind=shot`）: 時刻・何周目か・カメラ・設定の値・つなぎ方（全画素・質を上げる設定・夜景モード・Ultra HDR）・撮れた写真の大きさ・露出時間・本体の温度・スマホの動き（回転・傾き・歩いているか・ずれの打ち消し）・画像の変化・雑音に合わせた閾値・人の検出（省いたか・見つけた数・確からしい人の数・切り出して探したか）・判定とその理由（`moving_target:PERSON`・`phone_moved_person:HAND`・`close_subject`・`walking`・`no_moving_target`・`skipped_no_change` など）・ピントを合わせ直したか・手ぶれの見積もりと撮り直し・保存したか
 - 出来事の行（`kind=event`）: 撮影の開始（機種・設定）・カメラのつなぎ方（`bind`）とつなげなかったとき（`bind_fallback` と理由）・温度の段階の変化・撮れなかったカメラ・保存した写真の名前・保存の失敗
 
+送ってもらった記録は `python3 tools/dogfood/analyze_log.py ibc_log.1.csv ibc_log.csv > report.md` でまとめられます（撮り方ごとの保存の回数と理由、あやしい保存、全画素・Ultra HDR でつなげたか、変化の広さが合っているかと勧める値）。確かめる場面と手順は `tools/dogfood/CHECKLIST.md` にあります。
+
 ## 動作条件
 
 - Android 16（API 36）以降
