@@ -39,6 +39,8 @@ data class DogfoodRecord(
     val detections: Int? = null,
     val confidentPersons: Int? = null,
     val zoomed: Boolean? = null,
+    /** 「外・遠く」で、区画に分けて探して見つけた数（区画で探さなかった回は空）。 */
+    val tiledDetections: Int? = null,
     // 判定と結果
     val motion: Boolean? = null,
     val reason: String = "",
@@ -55,7 +57,7 @@ data class DogfoodRecord(
         imageWidth.text(), imageHeight.text(), exposureSeconds.text(6), heat,
         phoneMotion, rotationDegrees.text(2), tiltDegrees.text(2), walking.text(), compensatedShift,
         rawChangedRatio.text(4), changedRatio.text(4), noisePixelThreshold.text(),
-        detectionSkipped.text(), detections.text(), confidentPersons.text(), zoomed.text(),
+        detectionSkipped.text(), detections.text(), confidentPersons.text(), zoomed.text(), tiledDetections.text(),
         motion.text(), reason, refocused.text(), blurFraction.text(5), blurRetaken.text(), saved.text(), message,
     ).joinToString(",") { escape(it) }
 
@@ -67,7 +69,7 @@ data class DogfoodRecord(
             "image_width", "image_height", "exposure_s", "heat",
             "phone_motion", "rotation_deg", "tilt_deg", "walking", "compensated_shift",
             "raw_changed_ratio", "changed_ratio", "noise_pixel_threshold",
-            "detection_skipped", "detections", "confident_persons", "zoomed",
+            "detection_skipped", "detections", "confident_persons", "zoomed", "tiled_detections",
             "motion", "reason", "refocused", "blur_fraction", "blur_retaken", "saved", "message",
         ).joinToString(",")
 

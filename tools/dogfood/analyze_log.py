@@ -176,6 +176,9 @@ def report(sessions: list[Session]) -> str:
         sizes = Counter(f"{s.get('image_width')}×{s.get('image_height')}" for s in shots if s.get("image_width"))
         if sizes:
             out.append("- 撮れた写真の大きさ: " + "、".join(f"{k}（{v} 回）" for k, v in sizes.most_common()))
+        tiled = [s for s in shots if s.get("tiled_detections") not in (None, "")]
+        if tiled:
+            out.append(f"- 区画に分けて人を探した撮影: {len(tiled)} 回（見つけた数の合計 {sum(int(s['tiled_detections']) for s in tiled)}）")
         heats = Counter(s.get("heat", "") for s in shots)
         out.append("- 本体の温度: " + "、".join(f"{k} {v} 回" for k, v in heats.most_common()))
         if fallbacks:
