@@ -1,7 +1,5 @@
 package com.ichirocc.intervalbubblecamera
 
-import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /** 縮小した輝度画像（0〜255）。前後のフレームは同じ幅・高さで比較する。 */
 class LumaFrame(val width: Int, val height: Int, val pixels: IntArray) {
@@ -85,14 +83,14 @@ object MotionDetector {
             "frames must have the same size"
         }
         val count = current.pixels.size
-        val meanShift = (current.pixels.sum() - previous.pixels.sum()).toDouble() / count
-        val shift = meanShift.roundToInt()
+        // 照明・露出の変化は打ち消してから比べる（[LightingChange]）。
+        val mask = LightingChange.changedMask(previous, current, FrameShift.NONE, threshold)
 
         var changed = 0
         var sumX = 0L
         var sumY = 0L
         for (i in 0 until count) {
-            if (abs(current.pixels[i] - previous.pixels[i] - shift) > threshold.pixelThresholdAt(previous.pixels[i])) {
+            if (mask[i]) {
                 changed++
                 sumX += i % current.width
                 sumY += i / current.width
@@ -191,11 +189,7 @@ object MovingTargets {
         require(previous.width == current.width && previous.height == current.height) {
             "frames must have the same size"
         }
-        val count = current.pixels.size
-        val shift = ((current.pixels.sum() - previous.pixels.sum()).toDouble() / count).roundToInt()
-        return BooleanArray(count) {
-            abs(current.pixels[it] - previous.pixels[it] - shift) > threshold.pixelThresholdAt(previous.pixels[it])
-        }
+        return LightingChange.changedMask(previous, current, FrameShift.NONE, threshold)
     }
 
     /** 拡大して人を探す範囲の、変化した部分の大きさに対する余白（片側）。 */
