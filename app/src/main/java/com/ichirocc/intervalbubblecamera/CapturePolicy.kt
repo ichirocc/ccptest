@@ -27,11 +27,13 @@ data class CaptureSetup(val fullResolution: Boolean, val enhanced: Boolean, val 
  */
 object CapturePolicy {
     /**
-     * 全画素で撮るか。機種の設定（[DeviceProfile.fullResolution]）が有効で、温度が普通で、夜景モードでなければ
-     * （夜景モードは自分で大きさを決める）。
+     * 全画素で撮るか。機種の設定（[DeviceProfile.fullResolution]）が有効で、本体が熱くなく（やや熱いまでは撮る）、
+     * 夜景モードでなければ（夜景モードは自分で大きさを決める）。実機の写真では、全画素で 4080×3072、そうでない
+     * ときは 1920×1440（4 分の 1 以下）だったので、やや熱いときは人の検出を減らす・間隔を延ばすことで熱を抑え、
+     * 写真の大きさは落とさない。
      */
     fun useFullResolution(profile: DeviceProfile, heat: HeatLevel, night: Boolean): Boolean =
-        profile.fullResolution && heat == HeatLevel.NORMAL && !night
+        profile.fullResolution && heat <= HeatLevel.WARM && !night
 
     /**
      * 撮影の質を上げる設定（遅れの少ない撮影・光学式手ぶれ補正・高品質の処理）を使うか。夜景モードでは
