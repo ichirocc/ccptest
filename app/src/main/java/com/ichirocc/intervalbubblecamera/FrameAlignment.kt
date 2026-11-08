@@ -155,10 +155,18 @@ object FrameAlignment {
     }
 
     /**
-     * ずれを打ち消しても画面の大部分が変わっていれば、打ち消しきれていない（回りすぎ・その場で回した・
-     * 大きく動いた）とみなす。その回は、ずれを打ち消した比べ方を使わない。
+     * ずれ [shift] を打ち消しても画面の [MAX_ALIGNED_CHANGE_RATIO] 以上が変わっている、または見つけたずれが探した範囲
+     * [maxShift] の端（それより大きく動いた）なら、打ち消しきれていない（回りすぎ・その場で回した・大きく動いた）と
+     * みなす。その回は、ずれを打ち消した比べ方を使わない。
      */
-    fun aligned(result: MotionResult): Boolean = result.changedRatio < CameraMovement.MAX_SUBJECT_CHANGE_RATIO
+    fun aligned(result: MotionResult, shift: FrameShift = FrameShift.NONE, maxShift: Int = MAX_SHIFT): Boolean =
+        result.changedRatio < MAX_ALIGNED_CHANGE_RATIO && abs(shift.dx) < maxShift && abs(shift.dy) < maxShift
+
+    /**
+     * 重ね直せたとみなす、重ね直した後に変わった画素の割合の上限。実機の写真で、手に持って重ね直せた回は 0.5〜10%、
+     * スマホをひざの上などで大きく動かして重ね直せていない回は 30〜48% だった。
+     */
+    const val MAX_ALIGNED_CHANGE_RATIO = 0.25
 
     private fun meanShift(previous: LumaFrame, current: LumaFrame): Int =
         ((current.pixels.sum() - previous.pixels.sum()).toDouble() / current.pixels.size).roundToInt()

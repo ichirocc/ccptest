@@ -220,12 +220,21 @@ class TargetTracker(
         }
 
         /**
-         * スマホが動いた回に保存する理由になる人（全身・体の一部・手）。車などと、確からしさの低い検出は含めない。
-         * 複数いれば一番大きく写った人（ピントを合わせる対象）。
+         * スマホが動いた回に保存する理由になる人（全身・体の一部・手）。車などと、確からしさの低い検出、画面いっぱいの体
+         * （[ownBodyLike]: 持っている人の脚・ひざ・袖など）は含めない。複数いれば一番大きく写った人（ピントを合わせる対象）。
          */
         fun personInFrame(detections: List<DetectedTarget>): DetectedTarget? = detections
-            .filter { it.kind.isPerson && it.confident }
+            .filter { it.kind.isPerson && it.confident && !ownBodyLike(it) }
             .maxByOrNull { it.box.area }
+
+        /**
+         * 画面の [OWN_BODY_AREA] 以上を覆う人の枠。スマホを持っている人の脚・ひざ・袖が画面いっぱいに写ったもの
+         * （実機の写真で 0.81〜1.0。近くにいるほかの人は 0.54〜0.74 だった）。
+         */
+        fun ownBodyLike(target: DetectedTarget): Boolean = target.kind.isPerson && target.box.area >= OWN_BODY_AREA
+
+        /** [ownBodyLike] とみなす、画面に対する枠の広さ。 */
+        const val OWN_BODY_AREA = 0.8
 
         /**
          * 姿勢推定や手の検出の関節点（正規化座標）から、見えている点だけで枠を作る。

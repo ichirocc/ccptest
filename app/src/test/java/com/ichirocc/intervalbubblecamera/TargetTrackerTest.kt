@@ -153,6 +153,20 @@ class TargetTrackerTest {
     }
 
     @Test
+    fun `a body filling the frame is not a reason to save when the phone moved`() {
+        // 持っている人のひざが画面いっぱいに写った。
+        val ownKnee = DetectedTarget(NormalizedBox(0.0, 0.0, 1.0, 0.95), TargetKind.PERSON, score = 0.8)
+        assertTrue(TargetTracker.ownBodyLike(ownKnee))
+        assertNull(TargetTracker.personInFrame(listOf(ownKnee)))
+        // ほかの人も写っていれば、その人を理由に保存する。
+        val other = DetectedTarget(NormalizedBox(0.6, 0.1, 0.8, 0.6), TargetKind.PERSON, score = 0.7)
+        assertEquals(other, TargetTracker.personInFrame(listOf(ownKnee, other)))
+        // 近くにいるほかの人（画面の 7 割ほど）は自分の体とみなさない。
+        val near = DetectedTarget(NormalizedBox(0.0, 0.0, 0.75, 0.99), TargetKind.PERSON, score = 0.8)
+        assertEquals(near, TargetTracker.personInFrame(listOf(near)))
+    }
+
+    @Test
     fun `an unsure person is not a reason to save when the phone moved`() {
         val unsure = DetectedTarget(NormalizedBox(0.5, 0.2, 0.7, 0.9), TargetKind.PERSON, score = 0.25)
         assertNull(TargetTracker.personInFrame(listOf(unsure)))
