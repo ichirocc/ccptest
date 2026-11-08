@@ -200,10 +200,18 @@ class MainActivity : AppCompatActivity() {
         intervalSeekBar.progress = IntervalPolicy.seekProgressFromSeconds(savedInterval)
         renderInterval(IntervalPolicy.clampSeconds(savedInterval))
 
-        val savedThreshold = MotionThreshold.clamped(
+        val storedThreshold = MotionThreshold.clamped(
             preferences.getInt(KEY_MOTION_PIXEL_THRESHOLD, MotionThreshold.DEFAULT.pixelThreshold),
             preferences.getInt(KEY_MOTION_AREA_PERMILLE, MotionThreshold.DEFAULT.areaPermille),
         )
+        // 以前の「外・遠く」の値なら、今の「外・遠く」の値に置き換えて保存し直す。
+        val savedThreshold = CapturePreset.upgradedThreshold(IntervalPolicy.clampSeconds(savedInterval), storedThreshold)
+            ?.also { upgraded ->
+                preferences.edit {
+                    putInt(KEY_MOTION_PIXEL_THRESHOLD, upgraded.pixelThreshold)
+                    putInt(KEY_MOTION_AREA_PERMILLE, upgraded.areaPermille)
+                }
+            } ?: storedThreshold
         motionPixelSeekBar.progress = MotionThreshold.progressFromPixel(savedThreshold.pixelThreshold)
         motionAreaSeekBar.progress = MotionThreshold.progressFromArea(savedThreshold.areaPermille)
         renderMotionThreshold()
