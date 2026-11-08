@@ -127,16 +127,50 @@ def overlap(prev, cur, dx, dy):
             cur[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)])
 
 
-def mask_for(prev, cur, px, dx=0, dy=0, block=0):
-    """ずれ (dx, dy) を打ち消して比べた「変わった画素」（block>0 なら区画ごとに明るさをそろえる）。"""
+def _fit(p, c):
+    """LightingChange.fit と同じ: 前回 p から今回 c を予想する a*p+b（白飛び・真っ黒は使わず、差の大きい 2 割を除いてもう一度）。"""
+    ok = (p > 5) & (p < 250) & (c < 250)
+    if ok.sum() < 20:
+        return 1.0, float(c.mean() - p.mean())
+
+    def ls(pp, cc):
+        vp = ((pp - pp.mean()) ** 2).sum()
+        if vp <= 1e-9:
+            return 1.0, float(cc.mean() - pp.mean())
+        a = ((pp - pp.mean()) * (cc - cc.mean())).sum() / vp
+        return float(a), float(cc.mean() - a * pp.mean())
+    pp, cc = p[ok], c[ok]
+    a, b = ls(pp, cc)
+    r = np.abs(cc - (a * pp + b))
+    keep = r <= np.sort(r)[int((len(r) - 1) * 0.8)]
+    return ls(pp[keep], cc[keep]) if keep.sum() >= 20 else (a, b)
+
+
+def mask_for(prev, cur, px, dx=0, dy=0, block=0, light=False):
+    """ずれ (dx, dy) を打ち消して比べた「変わった画素」（block>0 なら区画ごとに明るさをそろえる）。
+    light=True は今の決まり（LightingChange）: 照明の変化を a*前回+b で打ち消し、区画ごとにも当てはめ直し、白飛びは比べない。"""
     h, w = cur.shape
     p, c = overlap(prev, cur, dx, dy)
-    diff = c - p - int(round((cur.sum() - prev.sum()) / cur.size))
-    if block:
-        diff = (c - p).astype(float)
-        for y in range(0, diff.shape[0], block):
-            for x in range(0, diff.shape[1], block):
-                diff[y:y + block, x:x + block] -= round(diff[y:y + block, x:x + block].mean())
+    if light:
+        p, c = p.astype(float), c.astype(float)
+        a, b = _fit(p.ravel(), c.ravel())
+        pred = np.clip(a * p + b, 0, 255)
+        exp = pred.copy()
+        if block:
+            for y in range(0, p.shape[0], block):
+                for x in range(0, p.shape[1], block):
+                    sl = (slice(y, y + block), slice(x, x + block))
+                    q, cc = pred[sl].ravel(), c[sl].ravel()
+                    a2, b2 = _fit(q, cc) if q.std() > 4 else (1.0, float(cc.mean() - q.mean()))
+                    exp[sl] = np.clip(a2 * pred[sl] + b2, 0, 255)
+        diff = np.where(((p >= 250) | (pred >= 250)) & (c >= 245), 0, c - exp)
+    else:
+        diff = c - p - int(round((cur.sum() - prev.sum()) / cur.size))
+        if block:
+            diff = (c - p).astype(float)
+            for y in range(0, diff.shape[0], block):
+                for x in range(0, diff.shape[1], block):
+                    diff[y:y + block, x:x + block] -= round(diff[y:y + block, x:x + block].mean())
     m = np.zeros((h, w), bool)
     m[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = np.abs(diff) > px
     return m, m.sum() / c.size
@@ -198,9 +232,9 @@ def decide(prev_img, cur_img, prev_det, cur_det, preset, new_rules):
         gp, gc = grid_point(prev_img), grid_point(cur_img)
         dx, dy = 0, 0
         min_move, close = 0.03, 0.30
-    m, ratio = mask_for(gp, gc, px, dx, dy)
+    m, ratio = mask_for(gp, gc, px, dx, dy, light=new_rules)
     _, raw = mask_for(gp, gc, px)
-    uneven, uneven_ratio = mask_for(gp, gc, px, dx, dy, block=10) if new_rules else (m, ratio)
+    uneven, uneven_ratio = mask_for(gp, gc, px, dx, dy, block=10, light=True) if new_rules else (m, ratio)
     motion = ratio >= area
 
     unmatched = [(k, b) for k, s, b in prev_det if s >= 0.4]
@@ -291,6 +325,12 @@ def _light(img, region, delta):
     return out
 
 
+def _dim_left(img, factor):
+    out = img.copy()
+    out[:, :img.shape[1] // 2] *= factor
+    return out
+
+
 def _cover(img, fraction, cloth):
     out = img.copy()
     h, w, _ = img.shape
@@ -307,6 +347,8 @@ def scenarios(img, box, cloth):
         ("自動露出で全体が 8% 明るく", img, np.clip(img * 1.08, 0, 255), 2, False),
         ("照明: 画面の右半分だけ +35", img, _light(img, (0.5, 0, 1, 1), 35), 2, False),
         ("照明: 窓など一部（1/4）が +60", img, _light(img, (0.6, 0, 1, 0.6), 60), 2, False),
+        ("照明: 部屋全体が暗くなる（0.75 倍）", img, img * 0.75, 2, False),
+        ("照明: 片側の照明が消える（左半分 0.7 倍）", img, _dim_left(img, 0.7), 2, False),
     ]
     for deg in (0.3, 1.0, 1.9):
         s.append((f"手ぶれ {deg}°（ジャイロでは止まっている扱い）", img, _shift(img, int(round(deg * px_per_degree))), 2, False))

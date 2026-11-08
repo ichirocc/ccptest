@@ -64,6 +64,10 @@ import com.ichirocc.intervalbubblecamera.DetectionTuning
 import com.ichirocc.intervalbubblecamera.DogfoodRecord
 import com.ichirocc.intervalbubblecamera.CameraFeatures
 import com.ichirocc.intervalbubblecamera.CaptureFallback
+import com.ichirocc.intervalbubblecamera.CapturePreset
+import com.ichirocc.intervalbubblecamera.TiledDetection
+import com.ichirocc.intervalbubblecamera.ColorThumb
+import com.ichirocc.intervalbubblecamera.ColorEvidence
 import com.ichirocc.intervalbubblecamera.CapturePolicy
 import com.ichirocc.intervalbubblecamera.CaptureSetup
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
@@ -80,7 +84,6 @@ import com.ichirocc.intervalbubblecamera.JpegOrientation
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
-import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.LowLightEnhancer
 import com.ichirocc.intervalbubblecamera.MotionThreshold
@@ -220,6 +223,9 @@ class IntervalCaptureService : LifecycleService() {
     private var currentIconColor = AppIconColor.DEFAULT
     private var motionThreshold = MotionThreshold.DEFAULT
     private val motionReferences = mutableMapOf<String, LumaFrame>()
+
+    /** カメラごとの、前回の縮めた色つきの画像（「外・遠く」で遠くの小さな人が動いたかを確かめる。[ColorEvidence]）。 */
+    private val colorThumbs = mutableMapOf<String, ColorThumb>()
     private val lastMotionCenters = mutableMapOf<String, MotionCenter>()
 
     /** 直近 2 秒の回転の速さ（撮影中の手ぶれを見積もる）。センサーのイベントも読み出しも main スレッド。 */
@@ -344,6 +350,7 @@ class IntervalCaptureService : LifecycleService() {
                 "pixel=${threshold.pixelThreshold} area_permille=${threshold.areaPermille}",
         )
         motionReferences.clear()
+        colorThumbs.clear()
         orientationAtFrame.clear()
         gravityAtFrame.clear()
         lastMotionCenters.clear()
@@ -879,8 +886,10 @@ class IntervalCaptureService : LifecycleService() {
             val holderWalking = walkingDetector.isWalking(SystemClock.elapsedRealtimeNanos())
             val trace = JudgeTrace(rotation = rotation, tilt = tilt, walking = holderWalking)
             traces[key] = trace
+            val shotTaken = captured
+            val thumb = if (tiledDetectionEnabled()) captured.image?.let { colorThumbOf(it) } else null
             val judgement = motionReferences[key]?.let {
-                judgeMotion(key, it, captured, rotation, tilt, lyingFlat, holderWalking, trace)
+                judgeMotion(key, it, captured, rotation, tilt, lyingFlat, holderWalking, thumb, trace)
             }
             if (judgement == null) trace.reason = "baseline"
             captured.image = null
@@ -900,6 +909,8 @@ class IntervalCaptureService : LifecycleService() {
                 captured = sharper
             }
             motionReferences[key] = captured.frame
+            // 撮り直した回は、縮めた色つきの画像が次に比べる画像と合わないので捨てる。
+            if (thumb != null && captured === shotTaken) colorThumbs[key] = thumb else colorThumbs.remove(key)
             // 向きが測れなかった回は前回の向きも捨てる（古い向きと比べて誤判定しないため）。
             if (orientation != null) orientationAtFrame[key] = orientation else orientationAtFrame.remove(key)
             if (gravity != null) gravityAtFrame[key] = gravity.copyOf() else gravityAtFrame.remove(key)
@@ -965,13 +976,16 @@ class IntervalCaptureService : LifecycleService() {
         phoneTiltDegrees: Double?,
         lyingFlat: Boolean,
         holderWalking: Boolean,
+        thumb: ColorThumb?,
         trace: JudgeTrace,
     ): MotionResult {
         // 暗い場面では雑音だけで変わったように見えるので、前回との差から明るさごとの雑音を見積もり、
         // 雑音より十分大きい変化だけを数える（ELD の雑音のモデル。NightMotion）。
         val threshold = NightMotion.thresholdFor(reference, shot.frame, motionThreshold)
         threshold.noise?.let { Log.d(TAG, "Dark frame for $key; noise $it") }
-        val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
+        // ずらさずに比べた変わった画素（MotionDetector.compare と同じ）。止まっている回は、そのまま使い回す。
+        val rawMask = FrameAlignment.alignedMask(reference, shot.frame, FrameShift.NONE, threshold)
+        val rawMotion = FrameAlignment.resultOf(rawMask, shot.frame.width, shot.frame.height, FrameShift.NONE, threshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker(minMove = tuningOf(key).minMove) }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
         trace.phoneMotion = phoneMotion.name
@@ -1003,8 +1017,14 @@ class IntervalCaptureService : LifecycleService() {
         }
         val comparedShift = compensation?.shift ?: steadyShift
         val comparedThreshold = compensation?.threshold ?: threshold
+        // 重ね直した比べ方の変わった画素は、人を探す範囲を決めるのにも使うので 1 回だけ求める。
+        val steadyMask = when {
+            compensation != null -> null
+            steadyShift == FrameShift.NONE -> rawMask
+            else -> FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
+        }
         val pixelMotion = compensation?.motion ?: if (steadyShift != FrameShift.NONE) {
-            FrameAlignment.compareAligned(reference, shot.frame, steadyShift, threshold)
+            FrameAlignment.resultOf(steadyMask!!, shot.frame.width, shot.frame.height, steadyShift, threshold)
         } else {
             rawMotion
         }
@@ -1089,7 +1109,7 @@ class IntervalCaptureService : LifecycleService() {
                     trace.targetKind = person?.kind?.name
                     return@runCatching person?.box
                 }
-                val mask = compensation?.mask ?: FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
+                val mask = compensation?.mask ?: steadyMask!!
                 if (pixelMotion.motionDetected) {
                     val before = detections.size
                     detections = withZoomedDetections(key, detector, shot, mask, detections, allOrientations)
@@ -1098,11 +1118,37 @@ class IntervalCaptureService : LifecycleService() {
                     trace.detections = detections.size
                     trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
                 }
+                // 「外・遠く」では、画面を 4 つの区画に分けて撮った写真から切り出し、遠くの小さな人も探す。
+                val tiled = tiledDetectionEnabled()
+                if (tiled) {
+                    val found = TiledDetection.regions.flatMap { region ->
+                        detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, TiledDetection.LONG_SIDE, allOrientations = false)
+                    }
+                    trace.tiledDetections = found.size
+                    if (found.isNotEmpty()) {
+                        detections = TargetTracker.fuse(detections + found)
+                        trace.detections = detections.size
+                        trace.confidentPersons = detections.count { it.kind.isPerson && it.confident }
+                    }
+                }
+                // 遠くの小さな人は明るさの格子では変化が薄まるので、「外・遠く」では縮めた色つきの画像の差で確かめる。
+                val previousThumb = colorThumbs[key]
+                val colorMask = if (tiled && thumb != null && previousThumb != null) {
+                    ColorEvidence.changedMask(previousThumb, thumb, comparedShift, shot.frame.width, shot.frame.height)
+                } else {
+                    null
+                }
                 // 画面の変化が閾値（大きさ・広さ）に届いたときだけ、人の枠の中の変化を動きとして数える。
                 // 届かなくても、人の位置が前回から動き、枠の中の画素も変わっていれば動きとする（ゆっくりした動き・遠くの人）。
                 val tracked = tracker.update(
                     detections,
-                    changedInBox = { box -> MovingTargets.changedInside(unevenMask, shot.frame.width, shot.frame.height, box) },
+                    changedInBox = { box ->
+                        if (colorMask != null && thumb != null) {
+                            ColorEvidence.movedInside(colorMask, thumb.width, thumb.height, box)
+                        } else {
+                            MovingTargets.changedInside(unevenMask, shot.frame.width, shot.frame.height, box)
+                        }
+                    },
                     shareOfChange = { box ->
                         // 変化がその人の枠に集まっているときだけ、人に変化が重なったとみなす（照明の変化や手ぶれは画面じゅうに
                         // 広がる）。区画ごとに明るさをそろえた変化で見る。
@@ -1188,9 +1234,10 @@ class IntervalCaptureService : LifecycleService() {
     private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
         val shift = FrameAlignment.estimate(reference, frame)
         val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
-        val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
+        val mask = FrameAlignment.alignedMask(reference, frame, shift, threshold)
+        val motion = FrameAlignment.resultOf(mask, frame.width, frame.height, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold), threshold)
+        return ShiftCompensation(shift, motion, mask, threshold)
     }
 
     /**
@@ -1219,6 +1266,21 @@ class IntervalCaptureService : LifecycleService() {
         if (zoomed.isEmpty()) return detections
         Log.i(TAG, "Zoomed detection found ${zoomed.size} target(s) in $region")
         return TargetTracker.fuse(detections + zoomed)
+    }
+
+    /** 区画に分けて人を探すか（「外・遠く」の撮り方で、本体が熱くないとき）。 */
+    private fun tiledDetectionEnabled(): Boolean =
+        TiledDetection.enabled(CapturePreset.matching(currentIntervalSeconds, motionThreshold), heatLevel)
+
+    /** 人の検出用の縮小画像から、色を比べるための小さな画像を作る。 */
+    private fun colorThumbOf(image: Bitmap): ColorThumb {
+        val width = ColorEvidence.WIDTH
+        val height = (image.height.toLong() * width / image.width).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(image, width, height, true)
+        val pixels = IntArray(width * height)
+        scaled.getPixels(pixels, 0, width, 0, 0, width, height)
+        if (scaled !== image) scaled.recycle()
+        return ColorThumb(width, height, pixels)
     }
 
     private fun tuningOf(key: String): DetectionTuning = detectionTunings[key] ?: CameraDetectionTuning.WIDE
@@ -1628,6 +1690,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         motionReferences.clear()
+        colorThumbs.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
         captureFallback.clear()
@@ -1650,6 +1713,7 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = emptyMap()
         boundCameras = emptyMap()
         motionReferences.clear()
+        colorThumbs.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
         captureFallback.clear()
@@ -1742,6 +1806,7 @@ class IntervalCaptureService : LifecycleService() {
         var detections: Int? = null
         var confidentPersons: Int? = null
         var zoomed: Boolean? = null
+        var tiledDetections: Int? = null
         var targetKind: String? = null
         var motion: Boolean? = null
         var reason = ""
@@ -1782,6 +1847,7 @@ class IntervalCaptureService : LifecycleService() {
                 detections = trace.detections,
                 confidentPersons = trace.confidentPersons,
                 zoomed = trace.zoomed,
+                tiledDetections = trace.tiledDetections,
                 motion = judgement?.motionDetected,
                 reason = trace.reason,
                 refocused = trace.refocused,

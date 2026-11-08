@@ -16,7 +16,7 @@ class DogfoodRecordTest {
             imageWidth = 8160, imageHeight = 6144, exposureSeconds = 0.0115, heat = "NORMAL",
             phoneMotion = "STILL", rotationDegrees = 0.3, tiltDegrees = 0.1, walking = false, compensatedShift = "",
             rawChangedRatio = 0.0123, changedRatio = 0.0123, noisePixelThreshold = 28,
-            detectionSkipped = false, detections = 2, confidentPersons = 1, zoomed = false,
+            detectionSkipped = false, detections = 2, confidentPersons = 1, zoomed = false, tiledDetections = 3,
             motion = true, reason = "moving_target:PERSON", refocused = true, blurFraction = 0.0004,
             blurRetaken = false, saved = true,
         )
