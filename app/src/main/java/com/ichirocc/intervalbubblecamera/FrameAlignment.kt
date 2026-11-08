@@ -82,10 +82,11 @@ object FrameAlignment {
      * ずれを打ち消して比べた動体検知の結果。変わった画素の割合は、前回と重なった部分に対する割合
      * （縁は比べられないため）。
      */
-    fun compareAligned(previous: LumaFrame, current: LumaFrame, shift: FrameShift, threshold: MotionThreshold): MotionResult {
-        val width = current.width
-        val height = current.height
-        val mask = alignedMask(previous, current, shift, threshold)
+    fun compareAligned(previous: LumaFrame, current: LumaFrame, shift: FrameShift, threshold: MotionThreshold): MotionResult =
+        resultOf(alignedMask(previous, current, shift, threshold), current.width, current.height, shift, threshold)
+
+    /** ずれ [shift] を打ち消して求めた変わった画素 [mask] から、動体検知の結果を作る（同じ比べ方を 2 回しないため）。 */
+    fun resultOf(mask: BooleanArray, width: Int, height: Int, shift: FrameShift, threshold: MotionThreshold): MotionResult {
         val overlap = (width - abs(shift.dx)) * (height - abs(shift.dy))
         var changed = 0
         var sumX = 0L

@@ -84,7 +84,6 @@ import com.ichirocc.intervalbubblecamera.JpegOrientation
 import com.ichirocc.intervalbubblecamera.LumaFrame
 import com.ichirocc.intervalbubblecamera.MainActivity
 import com.ichirocc.intervalbubblecamera.MotionCenter
-import com.ichirocc.intervalbubblecamera.MotionDetector
 import com.ichirocc.intervalbubblecamera.MotionResult
 import com.ichirocc.intervalbubblecamera.LowLightEnhancer
 import com.ichirocc.intervalbubblecamera.MotionThreshold
@@ -984,7 +983,9 @@ class IntervalCaptureService : LifecycleService() {
         // 雑音より十分大きい変化だけを数える（ELD の雑音のモデル。NightMotion）。
         val threshold = NightMotion.thresholdFor(reference, shot.frame, motionThreshold)
         threshold.noise?.let { Log.d(TAG, "Dark frame for $key; noise $it") }
-        val rawMotion = MotionDetector.compare(reference, shot.frame, threshold)
+        // ずらさずに比べた変わった画素（MotionDetector.compare と同じ）。止まっている回は、そのまま使い回す。
+        val rawMask = FrameAlignment.alignedMask(reference, shot.frame, FrameShift.NONE, threshold)
+        val rawMotion = FrameAlignment.resultOf(rawMask, shot.frame.width, shot.frame.height, FrameShift.NONE, threshold)
         val tracker = targetTrackers.getOrPut(key) { TargetTracker(minMove = tuningOf(key).minMove) }
         val phoneMotion = CameraMovement.judge(phoneRotationDegrees, rawMotion.changedRatio, phoneTiltDegrees, lyingFlat)
         trace.phoneMotion = phoneMotion.name
@@ -1016,8 +1017,14 @@ class IntervalCaptureService : LifecycleService() {
         }
         val comparedShift = compensation?.shift ?: steadyShift
         val comparedThreshold = compensation?.threshold ?: threshold
+        // 重ね直した比べ方の変わった画素は、人を探す範囲を決めるのにも使うので 1 回だけ求める。
+        val steadyMask = when {
+            compensation != null -> null
+            steadyShift == FrameShift.NONE -> rawMask
+            else -> FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
+        }
         val pixelMotion = compensation?.motion ?: if (steadyShift != FrameShift.NONE) {
-            FrameAlignment.compareAligned(reference, shot.frame, steadyShift, threshold)
+            FrameAlignment.resultOf(steadyMask!!, shot.frame.width, shot.frame.height, steadyShift, threshold)
         } else {
             rawMotion
         }
@@ -1102,7 +1109,7 @@ class IntervalCaptureService : LifecycleService() {
                     trace.targetKind = person?.kind?.name
                     return@runCatching person?.box
                 }
-                val mask = compensation?.mask ?: FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
+                val mask = compensation?.mask ?: steadyMask!!
                 if (pixelMotion.motionDetected) {
                     val before = detections.size
                     detections = withZoomedDetections(key, detector, shot, mask, detections, allOrientations)
@@ -1115,7 +1122,7 @@ class IntervalCaptureService : LifecycleService() {
                 val tiled = tiledDetectionEnabled()
                 if (tiled) {
                     val found = TiledDetection.regions.flatMap { region ->
-                        detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, detectSizeOf(key), allOrientations = false)
+                        detector.detectRegion(shot.jpeg, region, shot.rotationDegrees, TiledDetection.LONG_SIDE, allOrientations = false)
                     }
                     trace.tiledDetections = found.size
                     if (found.isNotEmpty()) {
@@ -1227,9 +1234,10 @@ class IntervalCaptureService : LifecycleService() {
     private fun compensateShift(reference: LumaFrame, frame: LumaFrame): ShiftCompensation? {
         val shift = FrameAlignment.estimate(reference, frame)
         val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
-        val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
+        val mask = FrameAlignment.alignedMask(reference, frame, shift, threshold)
+        val motion = FrameAlignment.resultOf(mask, frame.width, frame.height, shift, threshold)
         if (!FrameAlignment.aligned(motion)) return null
-        return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold), threshold)
+        return ShiftCompensation(shift, motion, mask, threshold)
     }
 
     /**

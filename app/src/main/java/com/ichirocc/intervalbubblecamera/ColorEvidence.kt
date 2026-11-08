@@ -85,6 +85,13 @@ object ColorEvidence {
 object TiledDetection {
     const val TILE_SIZE = 0.6
 
+    /**
+     * 区画を写真から切り出すときの長い辺の目安（画素）。人の検出は入力を 448 画素に縮めるので、それより少し
+     * 大きければ足りる。4080 画素の写真なら、区画（2448 画素）を 1/4 に縮めて読み出す（612 画素）ので、
+     * 縮めずに近い大きさ（1224 画素）で読むより読み出しも検出の前の縮小も 4 分の 1 ほどで済む。
+     */
+    const val LONG_SIDE = 512
+
     val regions: List<NormalizedBox> = listOf(0.0 to 0.0, 1 - TILE_SIZE to 0.0, 0.0 to 1 - TILE_SIZE, 1 - TILE_SIZE to 1 - TILE_SIZE)
         .map { (left, top) -> NormalizedBox(left, top, left + TILE_SIZE, top + TILE_SIZE) }
 
