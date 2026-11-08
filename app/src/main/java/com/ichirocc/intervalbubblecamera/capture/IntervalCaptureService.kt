@@ -63,7 +63,9 @@ import com.ichirocc.intervalbubblecamera.ThreeAState
 import com.ichirocc.intervalbubblecamera.DetectionTuning
 import com.ichirocc.intervalbubblecamera.DogfoodRecord
 import com.ichirocc.intervalbubblecamera.CameraFeatures
+import com.ichirocc.intervalbubblecamera.CaptureFallback
 import com.ichirocc.intervalbubblecamera.CapturePolicy
+import com.ichirocc.intervalbubblecamera.CaptureSetup
 import com.ichirocc.intervalbubblecamera.CameraSelectionPolicy
 import com.ichirocc.intervalbubblecamera.CameraSetDecision
 import com.ichirocc.intervalbubblecamera.CameraSetMotion
@@ -229,12 +231,13 @@ class IntervalCaptureService : LifecycleService() {
     /** Ultra HDR（明暗の幅が広い写真）で撮れるカメラ。 */
     private val ultraHdrCameras = mutableSetOf<String>()
 
-    /** 全画素・質を上げる設定でつなげなかった・撮れなかったカメラ（以後はふつうの撮り方で撮る）。 */
-    private val fallbackCameras = mutableSetOf<String>()
+    /** つなげなかった・撮れなかったカメラで、撮り方を何段外したか（Ultra HDR → 質を上げる設定 → 全画素）。 */
+    private val captureFallback = CaptureFallback()
 
-    /** 今つながっているカメラを、全画素で・質を上げる設定でつないだか。 */
-    private var boundFullResolution = false
-    private var boundEnhanced = false
+    /** 今つながっているカメラの撮り方。 */
+    private var boundSetup = CaptureSetup.PLAIN
+    private val boundFullResolution: Boolean get() = boundSetup.fullResolution
+    private val boundEnhanced: Boolean get() = boundSetup.enhanced
 
     /** カメラごとの 焦点距離 ÷ センサーの幅（手ぶれで像がどれだけ流れるかの計算に使う）。 */
     private val focalOverSensorWidth = mutableMapOf<String, Double>()
@@ -345,7 +348,7 @@ class IntervalCaptureService : LifecycleService() {
         gravityAtFrame.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
-        fallbackCameras.clear()
+        captureFallback.clear()
         targetTrackers.clear()
         sessionGeneration += 1
         val generation = sessionGeneration
@@ -539,31 +542,42 @@ class IntervalCaptureService : LifecycleService() {
         boundCameras = emptyMap()
         val entries = keys.map { key -> cameraEntries.first { it.key == key } }
         val night = wantsNight(keys)
-        val fullResolution = wantsFullResolution(keys)
-        val enhanced = wantsEnhanced(keys)
-        try {
-            bindCaptures(provider, keys, entries, night, fullResolution, enhanced)
-        } catch (error: RuntimeException) {
-            if (!fullResolution && !enhanced) throw error
-            // 全画素・質を上げる設定ではつなげなかった。このカメラはふつうの撮り方に戻す。
-            Log.w(TAG, "Unable to bind $keys with full resolution / enhanced capture; falling back", error)
-            logEvent("bind_fallback", keys.joinToString("/"), "${error.javaClass.simpleName}: ${error.message}")
-            fallbackCameras.addAll(keys)
-            provider.unbindAll()
-            bindCaptures(provider, keys, entries, night, fullResolution = false, enhanced = false)
+        val wanted = wantedSetup(keys)
+        var level = captureFallback.level(keys, cycleNumber)
+        while (true) {
+            val setup = CapturePolicy.setupAt(wanted, level)
+            try {
+                bindCaptures(provider, keys, entries, night, setup)
+                return
+            } catch (error: RuntimeException) {
+                // この撮り方ではつなげなかった。全部をやめずに 1 つだけ外してつなぎ直す（どれを外したかを記録する）。
+                val next = CapturePolicy.nextLevel(wanted, level) ?: throw error
+                val dropped = CapturePolicy.setupAt(wanted, next)
+                Log.w(TAG, "Unable to bind $keys with $setup; trying $dropped", error)
+                logEvent(
+                    "bind_fallback",
+                    keys.joinToString("/"),
+                    "failed=${describe(setup)} next=${describe(dropped)} ${error.javaClass.simpleName}: ${error.message}",
+                )
+                captureFallback.bindFailed(keys, next)
+                level = next
+                provider.unbindAll()
+            }
         }
     }
+
+    private fun describe(setup: CaptureSetup): String =
+        "full_resolution=${setup.fullResolution}/enhanced=${setup.enhanced}/ultra_hdr=${setup.ultraHdr}"
 
     private fun bindCaptures(
         provider: ProcessCameraProvider,
         keys: List<String>,
         entries: List<CameraEntry>,
         night: Boolean,
-        fullResolution: Boolean,
-        enhanced: Boolean,
+        setup: CaptureSetup,
     ) {
         keys.forEach { threeAStates.remove(it) }
-        val captures = keys.associateWith { newImageCapture(it, fullResolution, enhanced, reportState = !night) }
+        val captures = keys.associateWith { newImageCapture(it, setup, reportState = !night) }
         val cameras = when {
             night -> {
                 // 夜景モードは露出を合わせるために映像の流れが要るので、画面に出さないプレビューも一緒につなぐ。
@@ -585,22 +599,30 @@ class IntervalCaptureService : LifecycleService() {
         boundCaptures = captures
         boundCameras = keys.zip(cameras).toMap()
         boundNight = night
-        boundFullResolution = fullResolution
-        boundEnhanced = enhanced
-        if (fullResolution || enhanced) Log.i(TAG, "Bound $keys (full resolution=$fullResolution, enhanced=$enhanced)")
+        boundSetup = setup
+        if (!setup.plain) Log.i(TAG, "Bound $keys ($setup)")
         logEvent(
             "bind",
             keys.joinToString("/"),
-            "full_resolution=$fullResolution enhanced=$enhanced night=$night " +
-                "ultra_hdr=${enhanced && keys.any { it in ultraHdrCameras }} heat=$heatLevel",
+            "full_resolution=${setup.fullResolution} enhanced=${setup.enhanced} night=$night " +
+                "ultra_hdr=${setup.ultraHdr} heat=$heatLevel",
         )
     }
 
-    private fun wantsFullResolution(keys: List<String>): Boolean =
-        CapturePolicy.useFullResolution(deviceProfile, heatLevel, wantsNight(keys), keys.any { it in fallbackCameras })
+    /** カメラ [keys] で望む撮り方（外す前）。Ultra HDR は質を上げる設定のときだけ、対応しているカメラで使う。 */
+    private fun wantedSetup(keys: List<String>): CaptureSetup {
+        val night = wantsNight(keys)
+        val enhanced = CapturePolicy.useEnhancedCapture(night)
+        return CaptureSetup(
+            fullResolution = CapturePolicy.useFullResolution(deviceProfile, heatLevel, night),
+            enhanced = enhanced,
+            ultraHdr = enhanced && keys.all { it in ultraHdrCameras },
+        )
+    }
 
-    private fun wantsEnhanced(keys: List<String>): Boolean =
-        CapturePolicy.useEnhancedCapture(wantsNight(keys), keys.any { it in fallbackCameras })
+    /** カメラ [keys] を今つなぐ撮り方（外した段を差し引いたもの）。 */
+    private fun wantsSetup(keys: List<String>): CaptureSetup =
+        CapturePolicy.setupAt(wantedSetup(keys), captureFallback.level(keys, cycleNumber))
 
     private fun wantsNight(keys: List<String>): Boolean =
         nightModeSwitch.night && keys.size == 1 && cameraEntries.first { it.key == keys.single() }.nightSelector != null
@@ -713,7 +735,9 @@ class IntervalCaptureService : LifecycleService() {
      *   ふつうの JPEG として読めて、対応した画面では明るい所がより明るく見える）でも撮る。
      */
     @OptIn(ExperimentalCamera2Interop::class)
-    private fun newImageCapture(key: String, fullResolution: Boolean, enhanced: Boolean, reportState: Boolean): ImageCapture {
+    private fun newImageCapture(key: String, setup: CaptureSetup, reportState: Boolean): ImageCapture {
+        val fullResolution = setup.fullResolution
+        val enhanced = setup.enhanced
         val builder = ImageCapture.Builder()
             .setCaptureMode(
                 if (enhanced) ImageCapture.CAPTURE_MODE_ZERO_SHUTTER_LAG else ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY,
@@ -729,7 +753,7 @@ class IntervalCaptureService : LifecycleService() {
                     .build(),
             )
         }
-        if (enhanced && key in ultraHdrCameras) builder.setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
+        if (setup.ultraHdr && key in ultraHdrCameras) builder.setOutputFormat(ImageCapture.OUTPUT_FORMAT_JPEG_ULTRA_HDR)
         if (reportState) {
             // カメラが毎コマ知らせる露出・ホワイトバランス・ピントの状態を受け取る（切り替え直後に落ち着くのを待つ）。
             // 夜景モード（メーカーのカメラ拡張）では受け取れないので付けない。
@@ -775,7 +799,7 @@ class IntervalCaptureService : LifecycleService() {
             nightModeSwitch.night -> "夜景モード（${nightCameras.joinToString()}）"
             else -> "普通のモード（暗いと${nightCameras.joinToString()}は夜景モード）"
         }
-        val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras && it !in fallbackCameras }
+        val hdr = cameraEntries.map { it.key }.filter { it in ultraHdrCameras && captureFallback.level(it, cycleNumber) == 0 }
         val hdrLine = if (hdr.isEmpty()) "" else "\nUltra HDR: ${hdr.joinToString()}"
         val tuningLine = "\n人の検出: " + cameraEntries.joinToString { "${it.key} ${tuningOf(it.key).lensClass.label}" }
         return "カメラ${cameraEntries.size}台（1台ずつ切替）: ${cameraEntries.joinToString { it.key }}\n$lighting$hdrLine$tuningLine"
@@ -1281,10 +1305,20 @@ class IntervalCaptureService : LifecycleService() {
                         Log.w(TAG, "Retrying camera $key after: ${(first as InMemoryResult.Failed).message}")
                         delay(deviceProfile.switchSettleMs)
                         val second = captureToMemory(key, captures.getValue(key))
-                        if (second is InMemoryResult.Failed && (boundFullResolution || boundEnhanced)) {
-                            // 全画素・質を上げる設定では撮れないカメラ。次からはふつうの撮り方でつなぐ。
-                            Log.w(TAG, "Camera $key failed twice with full resolution / enhanced capture; falling back")
-                            fallbackCameras.add(key)
+                        if (second is InMemoryResult.Failed && !boundSetup.plain) {
+                            // この撮り方では撮れなかった。しばらくのあいだ 1 つ外して撮り、あとでもう一度元の撮り方で試す。
+                            val wanted = wantedSetup(listOf(key))
+                            val level = captureFallback.level(key, cycleNumber)
+                            CapturePolicy.nextLevel(wanted, level)?.let { next ->
+                                Log.w(TAG, "Camera $key failed twice with $boundSetup; using level $next for a while")
+                                logEvent(
+                                    "capture_fallback",
+                                    key,
+                                    "failed=${describe(boundSetup)} next=${describe(CapturePolicy.setupAt(wanted, next))} " +
+                                        second.message,
+                                )
+                                captureFallback.captureFailed(key, cycleNumber, next)
+                            }
                         }
                         second
                     }
@@ -1370,7 +1404,7 @@ class IntervalCaptureService : LifecycleService() {
 
     private fun isBound(group: List<String>): Boolean =
         group.toSet() == boundCaptures.keys && boundNight == wantsNight(group) &&
-            boundFullResolution == wantsFullResolution(group) && boundEnhanced == wantsEnhanced(group)
+            boundSetup == wantsSetup(group)
 
     /** 動いた位置にピントを合わせて撮り直す。合わせられないカメラでは null。 */
     private suspend fun refocusAndRetake(key: String, center: MotionCenter): InMemoryResult.Captured? {
@@ -1596,7 +1630,7 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
-        fallbackCameras.clear()
+        captureFallback.clear()
         targetTrackers.clear()
         focusedAt.clear()
         orientationListener.disable()
@@ -1618,7 +1652,7 @@ class IntervalCaptureService : LifecycleService() {
         motionReferences.clear()
         lastMotionCenters.clear()
         skippedDetections.clear()
-        fallbackCameras.clear()
+        captureFallback.clear()
         targetTrackers.clear()
         focusedAt.clear()
         orientationListener.disable()
@@ -1731,7 +1765,7 @@ class IntervalCaptureService : LifecycleService() {
                 fullResolution = boundFullResolution,
                 enhanced = boundEnhanced,
                 night = boundNight,
-                ultraHdr = boundEnhanced && key in ultraHdrCameras,
+                ultraHdr = boundSetup.ultraHdr && key in ultraHdrCameras,
                 imageWidth = shot.imageWidth,
                 imageHeight = shot.imageHeight,
                 exposureSeconds = shot.exposureSeconds,

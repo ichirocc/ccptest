@@ -7,7 +7,7 @@
 
 撮影の開始（kind=event, reason=start）ごとに 1 つの区切り（セッション）として、次をまとめる。
 - 何回撮って、何回保存したか（1 時間あたり）。保存した理由・しなかった理由の内訳。
-- 全画素・質を上げる設定・Ultra HDR で実際につなげたか。つなげなかった理由（bind_fallback）。
+- 全画素・質を上げる設定・Ultra HDR で実際につなげたか。つなげなかった・撮れなかった理由（bind_fallback・capture_fallback）。
 - あやしい保存: スマホが動いた回の手・体の一部、すぐ近くを覆った、歩きながら（撮っている人自身や
   となりの人を写したことが多い）。
 - 閾値が合っているか: 動きが無いと判定した回（静かな回）と、動く人を見つけた回の「変化の広さ」の分布を比べ、
@@ -167,7 +167,7 @@ def report(sessions: list[Session]) -> str:
 
         # カメラのつなぎ方
         binds = [e for e in session.events if e.get("reason") == "bind"]
-        fallbacks = [e for e in session.events if e.get("reason") == "bind_fallback"]
+        fallbacks = [e for e in session.events if e.get("reason") in ("bind_fallback", "capture_fallback")]
         out.append("### カメラのつなぎ方")
         full = sum(1 for s in shots if s.get("full_resolution") == "1")
         enhanced = sum(1 for s in shots if s.get("enhanced") == "1")
@@ -179,7 +179,7 @@ def report(sessions: list[Session]) -> str:
         heats = Counter(s.get("heat", "") for s in shots)
         out.append("- 本体の温度: " + "、".join(f"{k} {v} 回" for k, v in heats.most_common()))
         if fallbacks:
-            out.append(f"- **つなげなかった（ふつうの撮り方に戻した）: {len(fallbacks)} 回**")
+            out.append(f"- **つなげなかった・撮れなかったので 1 つ外した: {len(fallbacks)} 回**（failed= が失敗した撮り方、next= が次に試した撮り方）")
             for message, count in Counter(e.get("message", "") for e in fallbacks).most_common(5):
                 out.append(f"  - {count} 回: `{message}`")
         elif binds and full == 0 and enhanced == 0:
