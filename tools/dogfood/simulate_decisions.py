@@ -32,7 +32,7 @@ from PIL import Image, ImageOps
 ASSETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "app", "src", "main", "assets")
 GW, GH = 80, 60
 # 撮り方: (変化の大きさ, 変化の広さ)
-PRESETS = {"おすすめ": (28, 0.010), "外・遠く": (22, 0.003), "へや・近く": (32, 0.020)}
+PRESETS = {"おすすめ": (28, 0.010), "外・遠く": (28, 0.003), "へや・近く": (32, 0.020)}
 RNG = np.random.default_rng(1)
 
 

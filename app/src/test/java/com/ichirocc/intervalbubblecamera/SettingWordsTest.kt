@@ -7,7 +7,8 @@ class SettingWordsTest {
     @Test
     fun `each preset reads as an understandable level`() {
         assertEquals(SettingWords.Sensitivity.NORMAL, SettingWords.sensitivityOf(CapturePreset.STANDARD.pixelThreshold))
-        assertEquals(SettingWords.Sensitivity.SENSITIVE, SettingWords.sensitivityOf(CapturePreset.DISTANT.pixelThreshold))
+        // 外・遠くは、変化の大きさはおすすめと同じで、変化の広さを小さくして遠くの小さな人を拾う。
+        assertEquals(SettingWords.Sensitivity.NORMAL, SettingWords.sensitivityOf(CapturePreset.DISTANT.pixelThreshold))
         assertEquals(SettingWords.AreaSize.SMALL, SettingWords.areaSizeOf(CapturePreset.STANDARD.areaPermille))
         assertEquals(SettingWords.AreaSize.TINY, SettingWords.areaSizeOf(CapturePreset.DISTANT.areaPermille))
         assertEquals(SettingWords.AreaSize.PART, SettingWords.areaSizeOf(CapturePreset.NEARBY.areaPermille))
