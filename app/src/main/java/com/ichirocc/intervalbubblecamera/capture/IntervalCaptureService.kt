@@ -1063,7 +1063,6 @@ class IntervalCaptureService : LifecycleService() {
                     tracker.update(detections, shareOfChange = { 0.0 })
                     val person = TargetTracker.personInFrame(detections)
                     trace.targetKind = person?.kind?.name
-                    trace.ownBodyOnly = person == null && detections.any { TargetTracker.ownBodyLike(it) }
                     return@runCatching person?.box
                 }
                 val mask = compensation?.mask ?: FrameAlignment.alignedMask(reference, shot.frame, steadyShift, threshold)
@@ -1104,8 +1103,6 @@ class IntervalCaptureService : LifecycleService() {
                         pixelMotion
                     } else if (box == null) {
                         trace.reason = when {
-                            // 画面いっぱいの体（持っている人の脚・ひざ・袖など）しか写っていなかった。
-                            phoneMoved && trace.ownBodyOnly -> "phone_moved(own_body)"
                             phoneMoved -> "phone_moved"
                             // 人の枠は跳んだが、枠の中の画素は変わっていなかった（実機でこの決まりが効いた回を数える）。
                             trace.boxJumpOnly -> "no_moving_target(box_jump)"
@@ -1168,7 +1165,7 @@ class IntervalCaptureService : LifecycleService() {
         val shift = FrameAlignment.estimate(reference, frame)
         val threshold = NightMotion.thresholdFor(reference, frame, motionThreshold, shift)
         val motion = FrameAlignment.compareAligned(reference, frame, shift, threshold)
-        if (!FrameAlignment.aligned(motion, shift)) return null
+        if (!FrameAlignment.aligned(motion)) return null
         return ShiftCompensation(shift, motion, FrameAlignment.alignedMask(reference, frame, shift, threshold), threshold)
     }
 
@@ -1715,7 +1712,6 @@ class IntervalCaptureService : LifecycleService() {
         var motion: Boolean? = null
         var reason = ""
         var boxJumpOnly = false
-        var ownBodyOnly = false
         var refocused: Boolean? = null
         var blur: Double? = null
         var blurRetaken: Boolean? = null

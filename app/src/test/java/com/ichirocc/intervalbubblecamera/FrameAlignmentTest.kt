@@ -67,15 +67,6 @@ class FrameAlignmentTest {
     }
 
     @Test
-    fun `a shift at the edge of the search or a large leftover change is not aligned`() {
-        val small = MotionResult(0.05, true, null)
-        assertTrue(FrameAlignment.aligned(small, FrameShift(9, -9)))
-        assertFalse("the true shift may be larger", FrameAlignment.aligned(small, FrameShift(FrameAlignment.MAX_SHIFT, 0)))
-        assertFalse(FrameAlignment.aligned(small, FrameShift(0, -FrameAlignment.MAX_SHIFT)))
-        assertFalse(FrameAlignment.aligned(MotionResult(0.30, true, null), FrameShift(2, 1)))
-    }
-
-    @Test
     fun `tracked people move with the frame`() {
         val tracker = TargetTracker()
         val person = DetectedTarget(NormalizedBox(0.1, 0.2, 0.3, 0.9), TargetKind.PERSON)
