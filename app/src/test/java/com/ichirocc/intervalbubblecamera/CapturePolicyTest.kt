@@ -10,9 +10,12 @@ class CapturePolicyTest {
     private val everything = CaptureSetup(fullResolution = true, enhanced = true, ultraHdr = true)
 
     @Test
-    fun `the flagship captures with every pixel while cool`() {
+    fun `the flagship captures with every pixel until it gets hot`() {
         assertTrue(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.NORMAL, night = false))
-        assertFalse(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.WARM, night = false))
+        // やや熱いときも写真の大きさは落とさない（4080×3072 → 1920×1440 にならないように）。
+        assertTrue(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.WARM, night = false))
+        assertFalse(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.HOT, night = false))
+        assertFalse(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.CRITICAL, night = false))
         assertFalse(CapturePolicy.useFullResolution(DeviceProfile.FLAGSHIP, HeatLevel.NORMAL, night = true))
         assertFalse(CapturePolicy.useFullResolution(DeviceProfile.STANDARD, HeatLevel.NORMAL, night = false))
     }
