@@ -20,7 +20,9 @@ data class BrightnessModel(val gain: Double, val offset: Double) {
  *
  * 実機の写真 33 枚に照明の変化（全体が暗く・明るく、片側が消える、窓から日が差す、影、色合い、スポット
  * ライト）を加えて確かめると、照明だけで保存してしまう回が大きく減り（おすすめ: 正しく保存しなかったのが
- * 119/231 → 170/231）、これまでの場面の判定はほぼ変わらなかった。
+ * 119/231 → 170/231）、これまでの場面の判定はほぼ変わらなかった。区画ごとの比べ方に近くとの比を組み合わせると、
+ * 一部だけの照明（窓・影・スポットライト）で正しく保存しなかったのが 107/287 → 200/287 になり、保存するべき
+ * 場面の見落としは 3/158 増えただけだった（実機の写真 41 枚）。
  */
 object LightingChange {
     /** これ以上の明るさは白く飛んでいるとみなす（前回・予想）。 */
@@ -110,12 +112,40 @@ object LightingChange {
         } else {
             predicted
         }
+        // 区画ごとにそろえて比べるときは、近くの画素との明るさの比も変わったところだけを残す。窓から日が差す・影・
+        // スポットライトのように一部だけ照明が変わると、その境目が区画をまたいで当てはめきれないが、照明は近くの
+        // 画素を同じように明るく・暗くするので、近くとの比は変わらない（人が動くと比が変わる）。
+        val previousNear = if (blockSize > 0) neighbourMeans(previous) else null
+        val currentNear = if (blockSize > 0) neighbourMeans(current) else null
         return BooleanArray(count) { i ->
             val before0 = before[i]
             if (before0 < 0) return@BooleanArray false
             val now = current.pixels[i]
             val saturated = (before0 >= SATURATED || predicted[i] >= SATURATED) && now >= CURRENT_SATURATED
-            !saturated && abs(now - expected[i]) > threshold.pixelThresholdAt(before0)
+            val limit = threshold.pixelThresholdAt(before0)
+            val changed = !saturated && abs(now - expected[i]) > limit
+            if (!changed || previousNear == null || currentNear == null) return@BooleanArray changed
+            val j = (i / width - shift.dy) * width + (i % width - shift.dx)
+            val ratioBefore = (before0 + 1.0) / previousNear[j]
+            val ratioNow = (now + 1.0) / currentNear[i]
+            abs(ratioNow - ratioBefore) * currentNear[i] > limit
+        }
+    }
+
+    /** 画素ごとの、まわり 3×3（画面の外は端の画素で埋める）の（明るさ + 1）の平均。 */
+    private fun neighbourMeans(frame: LumaFrame): DoubleArray {
+        val width = frame.width
+        val height = frame.height
+        return DoubleArray(width * height) { i ->
+            val x = i % width
+            val y = i / width
+            var sum = 0.0
+            for (dy in -1..1) for (dx in -1..1) {
+                val nx = (x + dx).coerceIn(0, width - 1)
+                val ny = (y + dy).coerceIn(0, height - 1)
+                sum += frame.pixels[ny * width + nx] + 1.0
+            }
+            sum / 9
         }
     }
 

@@ -164,6 +164,14 @@ def mask_for(prev, cur, px, dx=0, dy=0, block=0, light=False):
                     a2, b2 = _fit(q, cc) if q.std() > 4 else (1.0, float(cc.mean() - q.mean()))
                     exp[sl] = np.clip(a2 * pred[sl] + b2, 0, 255)
         diff = np.where(((p >= 250) | (pred >= 250)) & (c >= 245), 0, c - exp)
+        if block:
+            # 区画ごとの比べ方では、近くの画素との明るさの比も変わったところだけを残す（一部だけの照明の変化を消す）
+            def near(x):
+                xp = np.pad(x + 1, 1, mode="edge")
+                return sum(xp[i:i + x.shape[0], j:j + x.shape[1]] for i in range(3) for j in range(3)) / 9
+            np_, nc = near(p), near(c)
+            local = np.abs((c + 1) / nc - (p + 1) / np_) * nc > px
+            diff = np.where(local, diff, 0)
     else:
         diff = c - p - int(round((cur.sum() - prev.sum()) / cur.size))
         if block:

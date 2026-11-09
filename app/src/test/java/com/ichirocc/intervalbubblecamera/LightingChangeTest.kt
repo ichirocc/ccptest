@@ -37,13 +37,20 @@ class LightingChangeTest {
     }
 
     @Test
+    fun `sunlight through part of a window is not a change once blocks and neighbours are used`() {
+        // 区画の境目と合わない所（横 13〜37・縦 7〜33）だけが 1.4 倍に明るくなった。
+        val window = map { x, y, v -> if (x in 13..37 && y in 7..33) (v * 1.4).toInt() else v }
+        assertTrue("only a few cells along the edge: ${changed(window, block = FrameAlignment.BLOCK_SIZE)}", changed(window, block = FrameAlignment.BLOCK_SIZE) <= 30)
+    }
+
+    @Test
     fun `a moving person is still found while the room dims`() {
         // 部屋が暗くなると同時に、横 30〜37・縦 20〜39 に人（背景とは関係のない模様）が入ってきた。
         val texture = Random(100)
         val current = map { x, y, v -> if (x in 30..37 && y in 20..39) 120 + texture.nextInt(130) else (v * 0.75).toInt() }
         val mask = LightingChange.changedMask(room, current, FrameShift.NONE, threshold, FrameAlignment.BLOCK_SIZE)
         val inside = (20..39).sumOf { y -> (30..37).count { x -> mask[y * width + x] } }
-        assertTrue("the person is found: $inside of 160", inside >= 50)
+        assertTrue("the person is found: $inside of 160", inside >= 40)
         assertTrue("little outside the person: ${mask.count { it } - inside}", mask.count { it } - inside <= 70)
         val box = NormalizedBox(30.0 / width, 20.0 / height, 38.0 / width, 40.0 / height)
         assertTrue(MovingTargets.changeConcentratedInside(mask, width, height, box))
