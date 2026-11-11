@@ -30,9 +30,9 @@ object CameraDetectionTuning {
     /** 横の画角（度）がこれ以下なら望遠。 */
     const val TELE_FOV = 40.0
 
-    val ULTRA_WIDE = DetectionTuning(LensClass.ULTRA_WIDE, detectSizeFactor = 1.5, minMove = 0.025, zoomMinRegion = 0.12)
+    val ULTRA_WIDE = DetectionTuning(LensClass.ULTRA_WIDE, detectSizeFactor = 1.5, minMove = 0.0125, zoomMinRegion = 0.12)
     val WIDE = DetectionTuning(LensClass.WIDE, detectSizeFactor = 1.0, minMove = TargetTracker.MIN_MOVE, zoomMinRegion = MovingTargets.REGION_MIN_SIZE)
-    val TELE = DetectionTuning(LensClass.TELE, detectSizeFactor = 0.75, minMove = 0.06, zoomMinRegion = 0.3)
+    val TELE = DetectionTuning(LensClass.TELE, detectSizeFactor = 0.75, minMove = 0.03, zoomMinRegion = 0.3)
 
     /** 焦点距離 ÷ センサーの幅 [focalOverSensorWidth] から求めた横の画角（度）。 */
     fun horizontalFovDegrees(focalOverSensorWidth: Double): Double =
