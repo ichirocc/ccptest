@@ -235,7 +235,7 @@ def decide(prev_img, cur_img, prev_det, cur_det, preset, new_rules):
     if new_rules:
         gp, gc = grid_area(prev_img), grid_area(cur_img)
         dx, dy = best_shift(gp, gc)
-        min_move, close = 0.04, 0.15
+        min_move, close = 0.02, 0.15
     else:
         gp, gc = grid_point(prev_img), grid_point(cur_img)
         dx, dy = 0, 0

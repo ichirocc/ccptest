@@ -41,11 +41,11 @@ class CameraDetectionTuningTest {
         val person = { x: Double -> DetectedTarget(NormalizedBox(x, 0.2, x + 0.2, 0.9), TargetKind.PERSON) }
         val ultraWide = TargetTracker(minMove = CameraDetectionTuning.ULTRA_WIDE.minMove)
         ultraWide.update(listOf(person(0.10)), { 0.0 })
-        assertTrue(ultraWide.update(listOf(person(0.13)), { 0.0 }).single().moving)
+        assertTrue(ultraWide.update(listOf(person(0.115)), { 0.0 }).single().moving)
 
         val wide = TargetTracker()
         wide.update(listOf(person(0.10)), { 0.0 })
-        assertFalse(wide.update(listOf(person(0.13)), { 0.0 }).single().moving)
+        assertFalse(wide.update(listOf(person(0.115)), { 0.0 }).single().moving)
     }
 
     @Test
